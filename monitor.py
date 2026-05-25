@@ -1,18 +1,23 @@
 """
-buscador.py — Motor de busca de preços v2
+buscador.py — Motor de busca de preços v3
 ==========================================
 Estratégia por loja:
   - Mercado Livre : API REST oficial (sem chave) + fallback scraping HTML
-  - Amazon        : scraping HTML + JSON-LD + múltiplos seletores
-  - KaBuM         : scraping HTML + JSON-LD + múltiplos seletores
-  - Magalu        : scraping HTML + JSON-LD + múltiplos seletores
-  - OLX           : scraping HTML + extração __NEXT_DATA__ (SSR)
-  - Enjoei        : scraping HTML + JSON-LD
+  - Amazon        : scraping HTML + JSON-LD + fallback link de busca
+  - KaBuM         : scraping HTML + JSON-LD + menor preço relevante
+  - Magalu        : scraping HTML + JSON-LD + __NEXT_DATA__ + fallback link
+  - OLX           : scraping HTML + __NEXT_DATA__ + fallback link
+  - Enjoei        : scraping HTML + JSON-LD + fallback link
 
 Filtro de relevância v3:
   - Bloqueia kits/combos/PCs Gamer mesmo que contenham o produto buscado
   - Detecta termos de modelo (com dígitos) para maior precisão
   - Limita razão de tamanho título/nome para evitar combos disfarçados
+
+Fallback de loja bloqueada:
+  - Quando o scraping é bloqueado (403/429/503), retorna resultado com
+    preco=None e link_tipo='busca' para o front exibir o link de busca.
+  - Isso garante que todas as lojas aparecem no painel, mesmo sem preço.
 
 Condição: sempre lida do dado real, nunca hardcoded.
 Link: detectar_tipo_link() classifica produto vs busca para o front.
@@ -54,10 +59,16 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 LOJAS_NOMES = {
@@ -83,6 +94,8 @@ CONDICAO_MAP = {
 KIT_KEYWORDS = {
     "pc gamer", "kit ", "combo ", "desktop gamer", "computador gamer",
     "setup gamer", "pc completo", "sistema completo", "monte seu pc",
+    "kit upgrade", "kit gamer", "bundle ", "processador + placa",
+    "cpu + mb", "cpu+mb", "ryzen + placa", "intel + placa",
 }
 
 # ── Cupons possíveis (base interna) ──────────────────────────────────────────
@@ -126,10 +139,13 @@ CUPONS_BASE: dict[str, list[dict]] = {
 # UTILITÁRIOS HTTP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def get_html(url: str, timeout: int = 20, extra_headers: dict | None = None) -> Optional[str]:
+def get_html(url: str, timeout: int = 25, extra_headers: dict | None = None) -> Optional[str]:
     h = {**HEADERS, **(extra_headers or {})}
     try:
         resp = requests.get(url, headers=h, timeout=timeout, allow_redirects=True)
+        if resp.status_code in (403, 429, 503):
+            log.warning(f"Bloqueio ({resp.status_code}) em {url} — loja bloqueia scraping de servidor")
+            return None
         if resp.status_code >= 400:
             log.warning(f"HTTP {resp.status_code} em {url}")
             return None
@@ -183,7 +199,6 @@ def limpar_preco(texto: str) -> Optional[float]:
 def normalizar_condicao(raw: str) -> str:
     if not raw:
         return "Não informado"
-    # itemCondition do schema.org vem como URL
     if "NewCondition" in raw or raw.strip().lower() in ("new", "novo"):
         return "Novo"
     if "UsedCondition" in raw or raw.strip().lower() in ("used", "usado"):
@@ -207,19 +222,18 @@ def detectar_tipo_link(url: str) -> str:
     if not url:
         return "sem_link"
     u = url.lower()
-    # Padrões de página de produto
     if any(p in u for p in [
         "/produto/", "/p/", "/dp/", "/mlb-", "produto.mercadolivre",
         "/item/", "/anuncio/", "/sku/",
     ]):
         return "produto"
-    # Padrões de busca
     if any(p in u for p in [
         "/busca", "/s?k=", "?q=", "?query=", "lista.mercadolivre",
         "olx.com.br/brasil", "/busca?", "enjoei.com.br/busca",
+        "magazineluiza.com.br/busca", "amazon.com.br/s",
     ]):
         return "busca"
-    return "produto"  # se não reconheceu como busca, assume produto
+    return "produto"
 
 
 def titulo_parece_relevante(titulo: str, nome: str) -> bool:
@@ -228,7 +242,7 @@ def titulo_parece_relevante(titulo: str, nome: str) -> bool:
     1. Bloqueia kits/combos/PCs Gamer mesmo que contenham o produto.
     2. Verifica cobertura dos termos do nome no título.
     3. Usa termos de modelo (com dígitos) como âncora forte.
-    4. Limita a razão de tamanho título/nome para barrar combos disfarçados.
+    4. Limita a razão de tamanho título/nome para evitar combos disfarçados.
     """
     if not titulo or not nome:
         return True
@@ -247,7 +261,6 @@ def titulo_parece_relevante(titulo: str, nome: str) -> bool:
     encontrados = sum(1 for t in termos if t in titulo_l)
     cobertura = encontrados / len(termos)
 
-    # Termos com dígitos são os mais identificadores (ex: "5700x", "14", "s24")
     termos_modelo = [t for t in termos if re.search(r"\d", t)]
     cobertura_modelo = (
         sum(1 for t in termos_modelo if t in titulo_l) / len(termos_modelo)
@@ -258,13 +271,10 @@ def titulo_parece_relevante(titulo: str, nome: str) -> bool:
     palavras_nome = len(set(re.split(r"\s+", nome_l)))
     razao = palavras_titulo / max(palavras_nome, 1)
 
-    # Regra 1: cobertura alta e título não muito maior que o nome
     if cobertura >= 0.8 and razao <= 5:
         return True
-    # Regra 2: cobertura média e tamanho razoável
     if cobertura >= 0.6 and razao <= 3:
         return True
-    # Regra 3: todos os termos de modelo presentes (produto certo, marca diferente)
     if cobertura_modelo >= 1.0 and razao <= 5:
         return True
 
@@ -385,7 +395,7 @@ def montar_possiveis_cupons(loja_id: str, soup: Optional[BeautifulSoup] = None) 
 
 def montar_resultado(
     loja_id: str,
-    preco: float,
+    preco: Optional[float],
     titulo: str,
     url: str,
     condicao: str,
@@ -394,14 +404,15 @@ def montar_resultado(
     """
     Constrói o dicionário padronizado de resultado.
     preco_final == preco real (cupons NÃO alteram o preço final).
+    preco pode ser None quando só temos o link de busca (loja bloqueou scraping).
     """
     cupons = montar_possiveis_cupons(loja_id, soup)
     link_tipo = detectar_tipo_link(url)
     return {
         "loja": LOJAS_NOMES.get(loja_id, loja_id),
         "loja_id": loja_id,
-        "preco": round(float(preco), 2),
-        "preco_final": round(float(preco), 2),
+        "preco": round(float(preco), 2) if preco else None,
+        "preco_final": round(float(preco), 2) if preco else None,
         "titulo": titulo,
         "url": url,
         "condicao": normalizar_condicao(condicao),
@@ -413,6 +424,28 @@ def montar_resultado(
             "Cupons listados são possíveis, não confirmados. Teste no checkout."
             if cupons else ""
         ),
+    }
+
+
+def montar_resultado_busca_fallback(loja_id: str, nome: str, url_busca: str) -> dict:
+    """
+    Resultado de fallback quando o scraping é bloqueado.
+    Retorna sem preço, mas com o link de busca para o usuário verificar manualmente.
+    """
+    cupons = montar_possiveis_cupons(loja_id)
+    return {
+        "loja": LOJAS_NOMES.get(loja_id, loja_id),
+        "loja_id": loja_id,
+        "preco": None,
+        "preco_final": None,
+        "titulo": f"Busca por '{nome}' (preço indisponível — verifique manualmente)",
+        "url": url_busca,
+        "condicao": "Não informado",
+        "link_tipo": "busca",
+        "possiveis_cupons": cupons,
+        "melhor_cupom": cupons[0] if cupons else None,
+        "cupom_confirmado": False,
+        "observacao_cupom": "Scraping bloqueado. Clique em 'Ver busca' para verificar o preço atual.",
     }
 
 
@@ -429,6 +462,7 @@ def filtrar_por_condicao(produto: dict, resultados: list[dict]) -> list[dict]:
         elif eh_novo and aceita_novo:
             filtrados.append(r)
         elif not eh_usado and not eh_novo:
+            # sem condição clara: inclui
             filtrados.append(r)
     return filtrados
 
@@ -451,6 +485,7 @@ def buscar_mercadolivre(nome: str) -> Optional[dict]:
             params={"q": nome, "limit": 10},
         )
         if data and "results" in data:
+            candidatos = []
             for item in data["results"]:
                 titulo = item.get("title", "")
                 if not titulo_parece_relevante(titulo, nome):
@@ -458,6 +493,14 @@ def buscar_mercadolivre(nome: str) -> Optional[dict]:
                 preco = item.get("price")
                 if not preco or float(preco) <= 0:
                     continue
+                candidatos.append((float(preco), item))
+
+            if candidatos:
+                # Pega o menor preço entre os relevantes
+                candidatos.sort(key=lambda x: x[0])
+                _, item = candidatos[0]
+                preco = item["price"]
+                titulo = item.get("title", "")
                 permalink = item.get("permalink", "")
                 condicao_raw = item.get("condition", "new")
                 resultado = montar_resultado(
@@ -485,8 +528,8 @@ def buscar_mercadolivre(nome: str) -> Optional[dict]:
         soup = BeautifulSoup(html, "html.parser")
         cards = soup.select("li.ui-search-layout__item")
 
+        candidatos = []
         for card in cards[:10]:
-            # Preço: fração inteira + centavos
             preco_el = card.select_one(".andes-money-amount__fraction")
             cents_el = card.select_one(".andes-money-amount__cents")
             if not preco_el:
@@ -507,7 +550,6 @@ def buscar_mercadolivre(nome: str) -> Optional[dict]:
             if not titulo_parece_relevante(titulo, nome):
                 continue
 
-            # Link: preferência por links /MLB- (produto direto)
             link_el = (
                 card.select_one("a[href*='produto.mercadolivre']")
                 or card.select_one("a[href*='/MLB-']")
@@ -516,14 +558,17 @@ def buscar_mercadolivre(nome: str) -> Optional[dict]:
             )
             link = link_el.get("href") if link_el else url_busca
 
-            # Condição: badge no card
             cond_el = card.select_one(
                 ".ui-search-item__condition, "
                 "[class*='condition'], "
                 "[class*='Condition']"
             )
             condicao = cond_el.get_text(strip=True) if cond_el else "Novo"
+            candidatos.append((preco, titulo, link, condicao))
 
+        if candidatos:
+            candidatos.sort(key=lambda x: x[0])
+            preco, titulo, link, condicao = candidatos[0]
             return montar_resultado("mercadolivre", preco, titulo, link, condicao, soup)
 
     except Exception as e:
@@ -537,25 +582,35 @@ def buscar_mercadolivre(nome: str) -> Optional[dict]:
 def buscar_amazon(nome: str) -> Optional[dict]:
     """
     Tenta JSON-LD primeiro; fallback para seletores HTML.
-    O seletor .a-price .a-offscreen já traz o preço completo formatado.
+    Se bloqueado (403/429/503), retorna resultado-fallback com link de busca.
     """
+    url_busca = f"https://www.amazon.com.br/s?k={quote_plus(nome)}"
     try:
-        url_busca = f"https://www.amazon.com.br/s?k={quote_plus(nome)}"
-        html = get_html(url_busca)
+        html = get_html(
+            url_busca,
+            extra_headers={"Referer": "https://www.amazon.com.br/"},
+        )
         if not html:
-            return None
+            log.info("[Amazon] Scraping bloqueado — retornando link de busca")
+            return montar_resultado_busca_fallback("amazon", nome, url_busca)
 
         soup = BeautifulSoup(html, "html.parser")
         base = "https://www.amazon.com.br"
 
         # Tentativa 1: JSON-LD
+        candidatos = []
         for p in extrair_json_ld_produtos(soup, base, url_busca):
             if titulo_parece_relevante(p["titulo"], nome) and p["preco"] > 10:
-                return montar_resultado("amazon", p["preco"], p["titulo"], p["url"], p["condicao"], soup)
+                candidatos.append(p)
+
+        if candidatos:
+            candidatos.sort(key=lambda x: x["preco"])
+            p = candidatos[0]
+            return montar_resultado("amazon", p["preco"], p["titulo"], p["url"], p["condicao"], soup)
 
         # Tentativa 2: cards de resultado
+        candidatos_html = []
         for card in soup.select('[data-component-type="s-search-result"]')[:10]:
-            # Preço — .a-offscreen já tem "R$ 1.235,60" em texto puro
             preco = None
             for sel in [".a-price .a-offscreen", ".a-price-whole"]:
                 el = card.select_one(sel)
@@ -571,14 +626,12 @@ def buscar_amazon(nome: str) -> Optional[dict]:
             if not titulo_parece_relevante(titulo, nome):
                 continue
 
-            # Link direto do produto /dp/
             link_el = (
                 card.select_one("a[href*='/dp/']")
                 or card.select_one("h2 a[href]")
             )
             link = normalizar_url(base, link_el.get("href") if link_el else "", url_busca)
 
-            # Condição: busca padrão da Amazon é "Novo"
             condicao = "Novo"
             cond_el = card.select_one(".a-color-secondary")
             if cond_el:
@@ -588,36 +641,62 @@ def buscar_amazon(nome: str) -> Optional[dict]:
                 elif "recondicionado" in txt or "renewed" in txt:
                     condicao = "Recondicionado"
 
+            candidatos_html.append((preco, titulo, link, condicao))
+
+        if candidatos_html:
+            candidatos_html.sort(key=lambda x: x[0])
+            preco, titulo, link, condicao = candidatos_html[0]
             return montar_resultado("amazon", preco, titulo, link, condicao, soup)
+
+        # HTML veio mas sem produtos reconhecíveis — ainda retorna link de busca
+        log.info("[Amazon] HTML sem produtos reconhecíveis — retornando link de busca")
+        return montar_resultado_busca_fallback("amazon", nome, url_busca)
 
     except Exception as e:
         log.warning(f"[Amazon] {e}")
-
-    return None
+        return montar_resultado_busca_fallback("amazon", nome, url_busca)
 
 
 # ── KaBuM ─────────────────────────────────────────────────────────────────────
 
 def buscar_kabum(nome: str) -> Optional[dict]:
     """
-    Tenta JSON-LD (que inclui URL de produto) primeiro.
-    Fallback: cards HTML com seletores prioritários para link /produto/.
+    FIX v3:
+    - URL usa hífens em vez de + (KaBuM trata espaços/+ como sem separador,
+      mas hífens funcionam de forma mais consistente).
+    - Coleta TODOS os produtos JSON-LD relevantes e retorna o de menor preço
+      (não o primeiro, que pode ser patrocinado/mais caro).
+    - Fallback HTML também coleta todos os candidatos e pega o menor preço.
     """
+    # KaBuM usa hífens: /busca/b550-aorus-elite
+    slug_busca = re.sub(r"\s+", "-", nome.strip().lower())
+    url_busca = f"https://www.kabum.com.br/busca/{slug_busca}"
+
     try:
-        url_busca = f"https://www.kabum.com.br/busca/{quote_plus(nome)}"
-        html = get_html(url_busca)
+        html = get_html(
+            url_busca,
+            extra_headers={"Referer": "https://www.kabum.com.br/"},
+        )
         if not html:
-            return None
+            log.info("[KaBuM] Sem HTML — retornando link de busca")
+            return montar_resultado_busca_fallback("kabum", nome, url_busca)
 
         soup = BeautifulSoup(html, "html.parser")
         base = "https://www.kabum.com.br"
 
-        # Tentativa 1: JSON-LD (mais confiável para URL de produto)
+        # Tentativa 1: JSON-LD — coleta todos relevantes, pega menor preço
+        candidatos = []
         for p in extrair_json_ld_produtos(soup, base, url_busca):
             if titulo_parece_relevante(p["titulo"], nome) and p["preco"] > 10:
-                return montar_resultado("kabum", p["preco"], p["titulo"], p["url"], p["condicao"], soup)
+                candidatos.append(p)
 
-        # Tentativa 2: cards HTML
+        if candidatos:
+            candidatos.sort(key=lambda x: x["preco"])
+            p = candidatos[0]
+            log.info(f"[KaBuM] JSON-LD: {len(candidatos)} relevantes, menor = R$ {p['preco']:.2f}")
+            return montar_resultado("kabum", p["preco"], p["titulo"], p["url"], p["condicao"], soup)
+
+        # Tentativa 2: cards HTML — mesma lógica de menor preço
         cards = soup.select(
             "article.productCard, "
             "[data-testid='product-card'], "
@@ -625,7 +704,9 @@ def buscar_kabum(nome: str) -> Optional[dict]:
             "div[class*='product-card'], "
             "article[class*='Card']"
         )
-        for card in cards[:15]:
+
+        candidatos_html = []
+        for card in cards[:20]:
             texto_card = card.get_text(" ", strip=True)
             if "R$" not in texto_card:
                 continue
@@ -653,48 +734,63 @@ def buscar_kabum(nome: str) -> Optional[dict]:
             if not titulo_parece_relevante(titulo, nome):
                 continue
 
-            # Link — KaBuM: /produto/CODIGO/slug
             link_el = (
                 card.select_one("a[href*='/produto/']")
                 or card.select_one("a[href]")
             )
             link = normalizar_url(base, link_el.get("href") if link_el else "", url_busca)
+            candidatos_html.append((preco, titulo, link))
 
+        if candidatos_html:
+            candidatos_html.sort(key=lambda x: x[0])
+            preco, titulo, link = candidatos_html[0]
+            log.info(f"[KaBuM] HTML: {len(candidatos_html)} relevantes, menor = R$ {preco:.2f}")
             return montar_resultado("kabum", preco, titulo, link, "Novo", soup)
+
+        # Sem resultados — retorna link de busca
+        log.info("[KaBuM] Sem resultados relevantes — retornando link de busca")
+        return montar_resultado_busca_fallback("kabum", nome, url_busca)
 
     except Exception as e:
         log.warning(f"[KaBuM] {e}")
-
-    return None
+        return montar_resultado_busca_fallback("kabum", nome, url_busca)
 
 
 # ── Magazine Luiza ────────────────────────────────────────────────────────────
 
 def buscar_magalu(nome: str) -> Optional[dict]:
     """
-    Tenta JSON-LD primeiro (URL de produto inclusa).
-    Fallback: cards HTML com link /p/ ou /produto/.
+    Tenta JSON-LD → __NEXT_DATA__ → cards HTML.
+    Se bloqueado, retorna resultado-fallback com link de busca.
     """
+    url_busca = f"https://www.magazineluiza.com.br/busca/{quote_plus(nome)}/"
     try:
-        url_busca = f"https://www.magazineluiza.com.br/busca/{quote_plus(nome)}/"
-        html = get_html(url_busca)
+        html = get_html(
+            url_busca,
+            extra_headers={"Referer": "https://www.magazineluiza.com.br/"},
+        )
         if not html:
-            return None
+            log.info("[Magalu] Scraping bloqueado — retornando link de busca")
+            return montar_resultado_busca_fallback("magalu", nome, url_busca)
 
         soup = BeautifulSoup(html, "html.parser")
         base = "https://www.magazineluiza.com.br"
 
         # Tentativa 1: JSON-LD
+        candidatos = []
         for p in extrair_json_ld_produtos(soup, base, url_busca):
             if titulo_parece_relevante(p["titulo"], nome) and p["preco"] > 10:
-                return montar_resultado("magalu", p["preco"], p["titulo"], p["url"], p["condicao"], soup)
+                candidatos.append(p)
+        if candidatos:
+            candidatos.sort(key=lambda x: x["preco"])
+            p = candidatos[0]
+            return montar_resultado("magalu", p["preco"], p["titulo"], p["url"], p["condicao"], soup)
 
-        # Tentativa 2: __NEXT_DATA__ (Magalu usa Next.js)
+        # Tentativa 2: __NEXT_DATA__
         nd_tag = soup.select_one("script#__NEXT_DATA__")
         if nd_tag:
             try:
                 nd = json.loads(nd_tag.string or "")
-                # Navega pela árvore procurando listas de produtos
                 produtos_nd = (
                     nd.get("props", {})
                     .get("pageProps", {})
@@ -702,7 +798,8 @@ def buscar_magalu(nome: str) -> Optional[dict]:
                     .get("search", {})
                     .get("products", [])
                 )
-                for prod in produtos_nd[:10]:
+                candidatos_nd = []
+                for prod in produtos_nd[:15]:
                     titulo = prod.get("title") or prod.get("description") or ""
                     if not titulo_parece_relevante(titulo, nome):
                         continue
@@ -712,6 +809,10 @@ def buscar_magalu(nome: str) -> Optional[dict]:
                     slug = prod.get("slug") or prod.get("id") or ""
                     link = normalizar_url(base, f"/{slug}" if slug else "", url_busca)
                     condicao = prod.get("condition") or "Novo"
+                    candidatos_nd.append((preco, titulo, link, condicao))
+                if candidatos_nd:
+                    candidatos_nd.sort(key=lambda x: x[0])
+                    preco, titulo, link, condicao = candidatos_nd[0]
                     return montar_resultado("magalu", preco, titulo, link, condicao, soup)
             except Exception:
                 pass
@@ -723,6 +824,7 @@ def buscar_magalu(nome: str) -> Optional[dict]:
             "article[class*='product'], "
             "div[class*='ProductCard']"
         )
+        candidatos_html = []
         for card in cards[:15]:
             texto_card = card.get_text(" ", strip=True)
             if "R$" not in texto_card:
@@ -752,34 +854,42 @@ def buscar_magalu(nome: str) -> Optional[dict]:
             if not titulo_parece_relevante(titulo, nome):
                 continue
 
-            # Link — Magalu: /slug/p/CODIGO/
             link_el = (
                 card.select_one("a[href*='/p/']")
                 or card.select_one("a[href]")
             )
             link = normalizar_url(base, link_el.get("href") if link_el else "", url_busca)
+            candidatos_html.append((preco, titulo, link))
 
+        if candidatos_html:
+            candidatos_html.sort(key=lambda x: x[0])
+            preco, titulo, link = candidatos_html[0]
             return montar_resultado("magalu", preco, titulo, link, "Novo", soup)
+
+        log.info("[Magalu] Sem resultados relevantes — retornando link de busca")
+        return montar_resultado_busca_fallback("magalu", nome, url_busca)
 
     except Exception as e:
         log.warning(f"[Magalu] {e}")
-
-    return None
+        return montar_resultado_busca_fallback("magalu", nome, url_busca)
 
 
 # ── OLX ──────────────────────────────────────────────────────────────────────
 
 def buscar_olx(nome: str) -> Optional[dict]:
     """
-    OLX usa React SPA. Tenta extrair de __NEXT_DATA__ (SSR parcial).
-    Fallback: seletores HTML.
-    NOTA: resultado pode ser vazio se OLX não renderizar no servidor.
+    OLX usa React SPA. Tenta __NEXT_DATA__ (SSR parcial) e seletores HTML.
+    Se bloqueado, retorna resultado-fallback com link de busca.
     """
+    url_busca = f"https://www.olx.com.br/brasil?q={quote_plus(nome)}"
     try:
-        url_busca = f"https://www.olx.com.br/brasil?q={quote_plus(nome)}"
-        html = get_html(url_busca)
+        html = get_html(
+            url_busca,
+            extra_headers={"Referer": "https://www.olx.com.br/"},
+        )
         if not html:
-            return None
+            log.info("[OLX] Scraping bloqueado — retornando link de busca")
+            return montar_resultado_busca_fallback("olx", nome, url_busca)
 
         soup = BeautifulSoup(html, "html.parser")
 
@@ -793,7 +903,8 @@ def buscar_olx(nome: str) -> Optional[dict]:
                     .get("pageProps", {})
                     .get("ads", [])
                 )
-                for ad in ads[:10]:
+                candidatos = []
+                for ad in ads[:15]:
                     preco_raw = ad.get("price", "")
                     preco = limpar_preco(str(preco_raw))
                     if not preco or preco <= 10:
@@ -802,9 +913,12 @@ def buscar_olx(nome: str) -> Optional[dict]:
                     if not titulo_parece_relevante(titulo, nome):
                         continue
                     link = ad.get("url") or url_busca
-                    # OLX não tem campo condition estruturado; tenta pelo title
                     condicao_raw = str(ad.get("category", {}).get("name", "")).lower()
                     condicao = "Usado" if "usado" in condicao_raw else "Não informado"
+                    candidatos.append((preco, titulo, link, condicao))
+                if candidatos:
+                    candidatos.sort(key=lambda x: x[0])
+                    preco, titulo, link, condicao = candidatos[0]
                     return montar_resultado("olx", preco, titulo, link, condicao)
             except Exception:
                 pass
@@ -816,6 +930,7 @@ def buscar_olx(nome: str) -> Optional[dict]:
             "li[class*='AdCard'], "
             "article"
         )
+        candidatos_html = []
         for card in cards[:15]:
             texto_card = card.get_text(" ", strip=True)
             if "R$" not in texto_card:
@@ -836,34 +951,50 @@ def buscar_olx(nome: str) -> Optional[dict]:
 
             link_el = card.select_one("a[href*='olx.com.br'], a[href]")
             link = link_el.get("href") if link_el else url_busca
+            candidatos_html.append((preco, titulo, link))
 
+        if candidatos_html:
+            candidatos_html.sort(key=lambda x: x[0])
+            preco, titulo, link = candidatos_html[0]
             return montar_resultado("olx", preco, titulo, link, "Usado")
+
+        log.info("[OLX] Sem resultados relevantes — retornando link de busca")
+        return montar_resultado_busca_fallback("olx", nome, url_busca)
 
     except Exception as e:
         log.warning(f"[OLX] {e}")
-
-    return None
+        return montar_resultado_busca_fallback("olx", nome, url_busca)
 
 
 # ── Enjoei ────────────────────────────────────────────────────────────────────
 
 def buscar_enjoei(nome: str) -> Optional[dict]:
     """
-    Enjoei é SPA React. Tenta JSON-LD (SSR) e seletores HTML.
+    Enjoei é SPA React. Tenta JSON-LD e seletores HTML.
+    Se bloqueado, retorna resultado-fallback com link de busca.
     """
+    url_busca = f"https://www.enjoei.com.br/busca?q={quote_plus(nome)}"
     try:
-        url_busca = f"https://www.enjoei.com.br/busca?q={quote_plus(nome)}"
-        html = get_html(url_busca)
+        html = get_html(
+            url_busca,
+            extra_headers={"Referer": "https://www.enjoei.com.br/"},
+        )
         if not html:
-            return None
+            log.info("[Enjoei] Scraping bloqueado — retornando link de busca")
+            return montar_resultado_busca_fallback("enjoei", nome, url_busca)
 
         soup = BeautifulSoup(html, "html.parser")
         base = "https://www.enjoei.com.br"
 
         # Tentativa 1: JSON-LD
+        candidatos = []
         for p in extrair_json_ld_produtos(soup, base, url_busca):
             if titulo_parece_relevante(p["titulo"], nome) and p["preco"] > 5:
-                return montar_resultado("enjoei", p["preco"], p["titulo"], p["url"], p["condicao"], soup)
+                candidatos.append(p)
+        if candidatos:
+            candidatos.sort(key=lambda x: x["preco"])
+            p = candidatos[0]
+            return montar_resultado("enjoei", p["preco"], p["titulo"], p["url"], p["condicao"], soup)
 
         # Tentativa 2: __NEXT_DATA__
         nd_tag = soup.select_one("script#__NEXT_DATA__")
@@ -871,13 +1002,10 @@ def buscar_enjoei(nome: str) -> Optional[dict]:
             try:
                 nd = json.loads(nd_tag.string or "")
                 produtos = (
-                    nd.get("props", {})
-                    .get("pageProps", {})
-                    .get("products", [])
-                    or nd.get("props", {})
-                    .get("pageProps", {})
-                    .get("items", [])
+                    nd.get("props", {}).get("pageProps", {}).get("products", [])
+                    or nd.get("props", {}).get("pageProps", {}).get("items", [])
                 )
+                candidatos_nd = []
                 for prod in produtos[:10]:
                     titulo = prod.get("title") or prod.get("name") or ""
                     if not titulo_parece_relevante(titulo, nome):
@@ -887,6 +1015,10 @@ def buscar_enjoei(nome: str) -> Optional[dict]:
                         continue
                     slug = prod.get("slug") or prod.get("id") or ""
                     link = normalizar_url(base, f"/p/{slug}" if slug else "", url_busca)
+                    candidatos_nd.append((preco, titulo, link))
+                if candidatos_nd:
+                    candidatos_nd.sort(key=lambda x: x[0])
+                    preco, titulo, link = candidatos_nd[0]
                     return montar_resultado("enjoei", preco, titulo, link, "Seminovo", soup)
             except Exception:
                 pass
@@ -896,6 +1028,7 @@ def buscar_enjoei(nome: str) -> Optional[dict]:
             "a[href*='/p/'], .product-card, "
             "[data-testid*='product'], article, li"
         )
+        candidatos_html = []
         for card in cards[:15]:
             texto_card = card.get_text(" ", strip=True)
             if "R$" not in texto_card:
@@ -916,13 +1049,19 @@ def buscar_enjoei(nome: str) -> Optional[dict]:
 
             link_el = card if getattr(card, "name", None) == "a" else card.select_one("a[href]")
             link = normalizar_url(base, link_el.get("href") if link_el else "", url_busca)
+            candidatos_html.append((preco, titulo, link))
 
+        if candidatos_html:
+            candidatos_html.sort(key=lambda x: x[0])
+            preco, titulo, link = candidatos_html[0]
             return montar_resultado("enjoei", preco, titulo, link, "Seminovo", soup)
+
+        log.info("[Enjoei] Sem resultados relevantes — retornando link de busca")
+        return montar_resultado_busca_fallback("enjoei", nome, url_busca)
 
     except Exception as e:
         log.warning(f"[Enjoei] {e}")
-
-    return None
+        return montar_resultado_busca_fallback("enjoei", nome, url_busca)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -939,10 +1078,11 @@ BUSCADORES = [
 ]
 
 
-def buscar_em_todos(nome: str, delay: float = 0.8) -> list[dict]:
+def buscar_em_todos(nome: str, delay: float = 1.0) -> list[dict]:
     """
     Executa todos os buscadores sequencialmente com delay entre requisições.
-    Retorna lista ordenada por preco_final crescente.
+    Resultados com preco=None (fallback de busca) vêm por último.
+    Resultados com preço são ordenados por preco_final crescente.
     """
     resultados = []
     for fn in BUSCADORES:
@@ -950,15 +1090,22 @@ def buscar_em_todos(nome: str, delay: float = 0.8) -> list[dict]:
             res = fn(nome)
             if res:
                 resultados.append(res)
+                preco_str = f"R$ {res['preco_final']:.2f}" if res.get("preco_final") else "sem preço (link de busca)"
                 log.info(
-                    f"  [{res['loja']}] R$ {res['preco_final']:.2f} | "
+                    f"  [{res['loja']}] {preco_str} | "
                     f"{res['condicao']} | {res['link_tipo']} | {res['titulo'][:50]}"
                 )
         except Exception as e:
             log.warning(f"Erro em {fn.__name__}: {e}")
         time.sleep(delay)
 
-    return sorted(resultados, key=lambda x: x["preco_final"])
+    # Ordenar: com preço primeiro (crescente), sem preço por último
+    com_preco = sorted(
+        [r for r in resultados if r.get("preco_final") is not None],
+        key=lambda x: x["preco_final"],
+    )
+    sem_preco = [r for r in resultados if r.get("preco_final") is None]
+    return com_preco + sem_preco
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -997,8 +1144,10 @@ def montar_email_alerta(
 ) -> str:
     nome = produto["nome"]
     meta = float(produto["preco_meta"])
-    melhor = resultados[0]
-    melhor_preco = melhor["preco_final"]
+    # Usa só resultados com preço para o melhor preço
+    com_preco = [r for r in resultados if r.get("preco_final") is not None]
+    melhor = com_preco[0] if com_preco else resultados[0]
+    melhor_preco = melhor.get("preco_final") or 0
     menor_hist = banco.menor_preco_historico(produto["id"])
     preco_sugerido = calcular_preco_sugerido(meta, melhor_preco, menor_hist)
 
@@ -1011,10 +1160,11 @@ def montar_email_alerta(
 
     lojas_rows = ""
     for r in resultados:
-        preco_r = r["preco_final"]
+        preco_r = r.get("preco_final")
+        preco_str = f"R$ {preco_r:.2f}" if preco_r else "Ver busca"
         cor = (
-            "#2e7d32" if preco_r <= meta
-            else "#e65100" if preco_r <= meta * 1.10
+            "#2e7d32" if preco_r and preco_r <= meta
+            else "#e65100" if preco_r and preco_r <= meta * 1.10
             else "#333"
         )
         cupons = r.get("possiveis_cupons", [])
@@ -1031,7 +1181,7 @@ def montar_email_alerta(
         <tr>
           <td style="padding:8px 12px;border-bottom:1px solid #eee;">{r['loja']}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #eee;font-weight:700;color:{cor};">
-            R$ {preco_r:.2f}
+            {preco_str}
           </td>
           <td style="padding:8px 12px;border-bottom:1px solid #eee;">{r.get('condicao','—')}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #eee;">{cupom_html}</td>
@@ -1082,6 +1232,7 @@ def montar_email_alerta(
           </a>
           <p style="font-size:11px;color:#999;margin-top:20px;border-top:1px solid #eee;padding-top:12px;">
             Preços mudam a qualquer momento. Cupons precisam ser testados no checkout.
+            Lojas sem preço exibido bloquearam acesso automático — use o link de busca.
           </p>
         </div>
       </body>
@@ -1114,9 +1265,16 @@ def verificar_todos() -> None:
             log.warning(f"  ⚠️  Nenhum resultado compatível com condições aceitas para '{nome}'")
             continue
 
-        resultados = sorted(resultados, key=lambda x: x["preco_final"])
+        # Reordena: com preço crescente, sem preço por último
+        com_preco = sorted(
+            [r for r in resultados if r.get("preco_final") is not None],
+            key=lambda x: x["preco_final"],
+        )
+        sem_preco = [r for r in resultados if r.get("preco_final") is None]
+        resultados = com_preco + sem_preco
 
-        for r in resultados:
+        # Só salva histórico de resultados com preço real
+        for r in com_preco:
             banco.inserir_historico(
                 p["id"],
                 r["loja"],
@@ -1126,7 +1284,11 @@ def verificar_todos() -> None:
                 r.get("url", ""),
             )
 
-        melhor = resultados[0]
+        if not com_preco:
+            log.warning(f"  ⚠️  Só temos links de busca para '{nome}', sem preços reais.")
+            continue
+
+        melhor = com_preco[0]
         meta = float(p["preco_meta"])
         melhor_preco = melhor["preco_final"]
         alerta_pct = float(p.get("alerta_proximo_pct", 10))
