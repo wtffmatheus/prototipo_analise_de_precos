@@ -316,12 +316,14 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
   const [lojaAtiva, setLojaAtiva] = useState(null);
   const [aba, setAba] = useState("precos");
 
+  // FIX: precoFinal sempre vem do preco_final do backend (nunca calculado aqui)
+  // O backend garante preco_final == preco (cupons nunca alteram o preço)
   const resultados = useMemo(() => {
     return (dados.resultados || [])
       .map((r) => ({
         ...r,
-        precoFinal: Number(r.preco_final || r.preco),
-        historico: gerarHistorico(Number(r.preco_final || r.preco)),
+        precoFinal: Number(r.preco_final ?? r.preco),
+        historico: gerarHistorico(Number(r.preco_final ?? r.preco)),
       }))
       .sort((a, b) => a.precoFinal - b.precoFinal);
   }, [dados]);
@@ -334,6 +336,11 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
   const lojaConf = lojaInfo[ativo?.loja_id] || { cor: T.cyan };
 
   const melhor = resultados[0];
+
+  // FIX: label do botão de link baseado no link_tipo real do backend
+  function labelLink(r) {
+    return r.link_tipo === "busca" ? "Ver busca →" : "Ver produto →";
+  }
 
   return (
     <div
@@ -484,6 +491,7 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                     const loja = lojaInfo[r.loja_id] || { cor: T.cyan, bg: T.cyanDim };
                     const atingiu = r.precoFinal <= meta;
                     const selecionada = lojaAtiva === r.loja_id;
+                    const eBusca = r.link_tipo === "busca";
 
                     return (
                       <div
@@ -503,6 +511,10 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                           <LojaTag id={r.loja_id} nome={r.loja} />
                           {index === 0 && <Chip color={T.green}>🏆 Melhor</Chip>}
                           {atingiu && <Chip color={T.green}>✅ Meta</Chip>}
+                          {/* FIX: badge de busca para deixar claro ao usuário */}
+                          {eBusca && (
+                            <Chip color={T.orange}>🔍 Busca</Chip>
+                          )}
                         </div>
 
                         <div
@@ -516,25 +528,22 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                           {formatarMoeda(r.precoFinal)}
                         </div>
 
-                        {r.precoFinal !== Number(r.preco) && (
-                          <div style={{ color: T.muted, fontSize: 13, marginBottom: 5 }}>
-                            Preço base: {formatarMoeda(r.preco)}
-                          </div>
-                        )}
+                        {/* FIX: removido o bloco "Preço base" que comparava preco vs preco_final
+                            e criava a falsa impressão de desconto aplicado.
+                            O backend garante que preco_final == preco (cupons nunca alteram o preço). */}
 
                         <div style={{ color: T.muted, fontSize: 13 }}>
                           {r.condicao} · {r.titulo || "Produto encontrado"}
                         </div>
 
                         {r.melhor_cupom && (
-                          <div style={{ color: T.orange, fontSize: 13, marginTop: 7 }}>
-                            🎟️ Cupom estimado: <b>{r.melhor_cupom.codigo}</b>
-                          </div>
-                        )}
-
-                        {r.observacao_cupom && (
-                          <div style={{ color: T.muted, fontSize: 12, marginTop: 5 }}>
-                            {r.observacao_cupom}
+                          <div style={{ marginTop: 7 }}>
+                            <div style={{ color: T.orange, fontSize: 13 }}>
+                              🎟️ Cupom estimado: <b>{r.melhor_cupom.codigo}</b>
+                            </div>
+                            <div style={{ color: T.muted, fontSize: 12, marginTop: 3 }}>
+                              Não aplicado no preço — teste no checkout.
+                            </div>
                           </div>
                         )}
 
@@ -554,7 +563,8 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                             fontWeight: 900,
                           }}
                         >
-                          Ver produto →
+                          {/* FIX: label correto baseado em link_tipo */}
+                          {labelLink(r)}
                         </a>
                       </div>
                     );
@@ -600,7 +610,8 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                           fontWeight: 950,
                         }}
                       >
-                        Abrir produto →
+                        {/* FIX: label correto no botão do histórico */}
+                        {ativo.link_tipo === "busca" ? "Abrir busca →" : "Abrir produto →"}
                       </a>
                     </div>
 
@@ -639,7 +650,10 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                 <h2 style={{ marginTop: 0 }}>Cupons estimados</h2>
                 <p style={{ color: T.muted, lineHeight: 1.6 }}>
                   Sem API oficial de cupons das lojas, o sistema não consegue garantir que um cupom esteja ativo.
-                  Por isso, eles aparecem como estimativa e devem ser testados no checkout.
+                  Por isso, eles aparecem como estimativa e devem ser testados no checkout.{" "}
+                  <b style={{ color: T.orange }}>
+                    Os preços exibidos NÃO incluem nenhum desconto de cupom.
+                  </b>
                 </p>
 
                 <div style={{ display: "grid", gap: 10 }}>
@@ -659,7 +673,15 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                         <div style={{ marginTop: 10 }}>
                           Cupom: <b style={{ color: T.orange }}>{r.melhor_cupom.codigo}</b>
                         </div>
-                        <div>Preço estimado: <b>{formatarMoeda(r.precoFinal)}</b></div>
+                        {/* FIX: era "Preço estimado" sugerindo que o cupom foi aplicado.
+                            Agora mostra o preço real sem qualquer cálculo de desconto. */}
+                        <div>
+                          Preço real:{" "}
+                          <b>{formatarMoeda(r.precoFinal)}</b>
+                          <span style={{ color: T.muted, fontSize: 12, marginLeft: 6 }}>
+                            (cupom não aplicado)
+                          </span>
+                        </div>
                         <div style={{ color: T.muted, fontSize: 13 }}>
                           {r.melhor_cupom.condicao}
                         </div>
@@ -769,8 +791,6 @@ export default function App() {
           alerta_proximo_pct: form.proximidade,
           aceita_usado: form.aceitaUsado,
           aceita_novo: form.aceitaNovo,
-          cupom: "",
-          desconto_pct: 0,
         }),
       });
 
