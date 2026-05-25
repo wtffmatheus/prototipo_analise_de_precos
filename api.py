@@ -5,7 +5,7 @@ import schedule
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 import banco
 import monitor
@@ -38,8 +38,6 @@ class ProdutoIn(BaseModel):
     nome: str
     preco_meta: float
     email: str = ""
-    cupom: str = ""
-    desconto_pct: float = 0
     alerta_proximo_pct: float = 10
     aceita_usado: bool = True
     aceita_novo: bool = True
@@ -90,17 +88,11 @@ def post_produto(body: ProdutoIn):
         nome=body.nome,
         preco_meta=body.preco_meta,
         email=body.email,
-        cupom=body.cupom,
-        desconto_pct=body.desconto_pct,
         alerta_proximo_pct=body.alerta_proximo_pct,
         aceita_usado=body.aceita_usado,
         aceita_novo=body.aceita_novo,
     )
-
-    return {
-        "id": pid,
-        "mensagem": "Produto adicionado com sucesso!",
-    }
+    return {"id": pid, "mensagem": "Produto adicionado com sucesso!"}
 
 
 @app.put("/produtos/{produto_id}")
@@ -113,15 +105,11 @@ def put_produto(produto_id: int, body: ProdutoIn):
         nome=body.nome,
         preco_meta=body.preco_meta,
         email=body.email,
-        cupom=body.cupom,
-        desconto_pct=body.desconto_pct,
         alerta_proximo_pct=body.alerta_proximo_pct,
         aceita_usado=body.aceita_usado,
         aceita_novo=body.aceita_novo,
     )
-
     banco.limpar_alertas_produto(produto_id)
-
     return {"mensagem": "Produto atualizado!"}
 
 
@@ -135,17 +123,13 @@ def del_produto(produto_id: int):
 def buscar(body: ProdutoIn):
     """
     Rota principal do site.
-
-    Cadastra o produto, busca preços reais via scrapers, salva histórico,
-    retorna resultados ao frontend e dispara a verificação de alerta.
+    Cadastra o produto, busca preços reais, salva histórico,
+    retorna resultados. simulacao=False sempre — sem fallback fake.
     """
-
     pid = banco.inserir_produto(
         nome=body.nome,
         preco_meta=body.preco_meta,
         email=body.email,
-        cupom=body.cupom,
-        desconto_pct=body.desconto_pct,
         alerta_proximo_pct=body.alerta_proximo_pct,
         aceita_usado=body.aceita_usado,
         aceita_novo=body.aceita_novo,
@@ -156,14 +140,20 @@ def buscar(body: ProdutoIn):
     resultados = monitor.buscar_em_todos(body.nome)
     resultados = monitor.filtrar_por_condicao(produto, resultados)
 
+    # Sem resultados: retorna vazio honestamente, sem simulação
     if not resultados:
         return {
             "id": pid,
             "produto_normalizado": body.nome,
             "meta": body.preco_meta,
             "email": body.email,
+            "simulacao": False,
             "resultados": [],
-            "analise": "Nenhum preço foi encontrado agora. O produto foi salvo e continuará sendo monitorado."
+            "analise": (
+                "Nenhum preço foi encontrado agora nas lojas monitoradas. "
+                "Isso pode ocorrer por bloqueio temporário dos sites ou ausência do produto. "
+                "O produto foi salvo e será verificado automaticamente a cada 30 minutos."
+            )
         }
 
     resultados = sorted(resultados, key=lambda x: x.get("preco_final", x["preco"]))
@@ -173,33 +163,35 @@ def buscar(body: ProdutoIn):
             produto_id=pid,
             loja=r["loja"],
             loja_id=r["loja_id"],
-            preco=r.get("preco_final", r["preco"]),
+            preco=r["preco_final"],
             condicao=r.get("condicao", ""),
             url=r.get("url", ""),
         )
 
     melhor = resultados[0]
-    melhor_preco = melhor.get("preco_final", melhor["preco"])
+    melhor_preco = melhor["preco_final"]
     meta = body.preco_meta
     limite_proximo = meta * (1 + body.alerta_proximo_pct / 100)
 
     if melhor_preco <= meta:
         analise = (
-            f"O melhor preço encontrado foi R$ {melhor_preco:.2f} na {melhor['loja']}. "
-            f"Ele bateu sua meta de R$ {meta:.2f}. O produto foi salvo para alertas por email."
+            f"✅ O melhor preço encontrado foi R$ {melhor_preco:.2f} na {melhor['loja']}. "
+            f"Ele bateu sua meta de R$ {meta:.2f}! O produto está salvo para alertas por email."
         )
     elif melhor_preco <= limite_proximo:
         analise = (
-            f"O melhor preço encontrado foi R$ {melhor_preco:.2f} na {melhor['loja']}. "
-            f"Ainda não bateu a meta de R$ {meta:.2f}, mas está próximo."
+            f"👀 O melhor preço encontrado foi R$ {melhor_preco:.2f} na {melhor['loja']}. "
+            f"Ainda não bateu a meta de R$ {meta:.2f}, mas está próximo ({body.alerta_proximo_pct:.0f}% de margem)."
         )
     else:
+        diff_pct = ((melhor_preco - meta) / meta) * 100
         analise = (
-            f"O melhor preço encontrado foi R$ {melhor_preco:.2f} na {melhor['loja']}. "
-            f"Ainda está distante da meta de R$ {meta:.2f}, mas continuará sendo monitorado."
+            f"📊 O melhor preço encontrado foi R$ {melhor_preco:.2f} na {melhor['loja']}. "
+            f"Ainda está {diff_pct:.1f}% acima da meta de R$ {meta:.2f}. "
+            f"O produto continuará sendo monitorado a cada 30 minutos."
         )
 
-    # Verificação em background para possível email.
+    # Dispara verificação em background para possível envio de email
     threading.Thread(target=monitor.verificar_todos, daemon=True).start()
 
     return {
@@ -210,6 +202,7 @@ def buscar(body: ProdutoIn):
         "alerta_proximo_pct": body.alerta_proximo_pct,
         "aceita_usado": body.aceita_usado,
         "aceita_novo": body.aceita_novo,
+        "simulacao": False,
         "resultados": resultados,
         "analise": analise,
     }
@@ -223,7 +216,6 @@ def get_historico(produto_id: int, loja_id: str = None):
 @app.get("/produtos/{produto_id}/cupons")
 def get_cupons(produto_id: int):
     produto = banco.buscar_produto(produto_id)
-
     if not produto:
         raise HTTPException(status_code=404, detail="Produto não encontrado")
 
@@ -235,19 +227,19 @@ def get_cupons(produto_id: int):
         preco = h["preco"]
 
         for c in monitor.CUPONS_BASE.get(loja_id, []):
-            final = monitor.calc_preco_final(preco, c)
-
+            # FIX: calc_preco_final não existe — cupons nunca alteram o preço,
+            # então preco_final_estimado == preco (exibido como referência apenas)
             resultado.append({
                 "loja": h["loja"],
                 "loja_id": loja_id,
-                "preco_base": preco,
-                "preco_final_estimado": final,
-                "bate_meta": final <= produto["preco_meta"],
-                "observacao": "Cupom estimado. Confirme no checkout da loja.",
+                "preco_real": preco,
+                "preco_final_estimado": preco,  # cupom NÃO é aplicado
+                "bate_meta": preco <= produto["preco_meta"],
+                "observacao": "Cupom estimado. Confirme no checkout da loja. Preço não alterado.",
                 **c,
             })
 
-    return sorted(resultado, key=lambda x: x["preco_final_estimado"])
+    return sorted(resultado, key=lambda x: x["preco_real"])
 
 
 @app.post("/verificar")
