@@ -21,142 +21,10 @@ const T = {
   green: "#00e676",
   greenDim: "#00e67618",
   orange: "#ffab40",
-  orangeDim: "#ffab4018",
   red: "#ff5252",
-  purple: "#ce93d8",
   text: "#dde3f5",
   muted: "#7b88a8",
   dim: "#4a5568",
-};
-
-const LOJAS = {
-  mercadolivre: {
-    nome: "Mercado Livre",
-    cor: "#ffe600",
-    bg: "#ffe60015",
-    emoji: "🛒",
-    tipo: "Novo",
-  },
-  amazon: {
-    nome: "Amazon",
-    cor: "#ff9900",
-    bg: "#ff990015",
-    emoji: "📦",
-    tipo: "Novo",
-  },
-  kabum: {
-    nome: "KaBuM!",
-    cor: "#f04e23",
-    bg: "#f04e2315",
-    emoji: "🖥️",
-    tipo: "Novo",
-  },
-  magalu: {
-    nome: "Magalu",
-    cor: "#0086ff",
-    bg: "#0086ff15",
-    emoji: "🛍️",
-    tipo: "Novo",
-  },
-  olx: {
-    nome: "OLX",
-    cor: "#9adc00",
-    bg: "#9adc0015",
-    emoji: "🏷️",
-    tipo: "Usado",
-  },
-  enjoei: {
-    nome: "Enjoei",
-    cor: "#ff69b4",
-    bg: "#ff69b415",
-    emoji: "✨",
-    tipo: "Seminovo",
-  },
-};
-
-const CUPONS_ESTIMADOS = {
-  mercadolivre: [
-    {
-      codigo: "MELI5",
-      desc_pct: 5,
-      desc_fixo: 0,
-      tipo: "percentual",
-      condicao: "Estimado para compras selecionadas",
-    },
-    {
-      codigo: "APPML10",
-      desc_pct: 10,
-      desc_fixo: 0,
-      tipo: "percentual",
-      condicao: "Estimado para compra pelo app",
-    },
-  ],
-  amazon: [
-    {
-      codigo: "APP10",
-      desc_pct: 10,
-      desc_fixo: 0,
-      tipo: "percentual",
-      condicao: "Estimado para compra pelo app",
-    },
-    {
-      codigo: "PRIME30",
-      desc_pct: 0,
-      desc_fixo: 30,
-      tipo: "fixo",
-      condicao: "Estimado para assinantes Prime",
-    },
-  ],
-  kabum: [
-    {
-      codigo: "KABUM10",
-      desc_pct: 10,
-      desc_fixo: 0,
-      tipo: "percentual",
-      condicao: "Estimado para Pix/Boleto",
-    },
-    {
-      codigo: "KABUM5",
-      desc_pct: 5,
-      desc_fixo: 0,
-      tipo: "percentual",
-      condicao: "Estimado para produtos selecionados",
-    },
-  ],
-  magalu: [
-    {
-      codigo: "APP15",
-      desc_pct: 15,
-      desc_fixo: 0,
-      tipo: "percentual",
-      condicao: "Estimado para app Magalu",
-    },
-    {
-      codigo: "PIX5",
-      desc_pct: 5,
-      desc_fixo: 0,
-      tipo: "percentual",
-      condicao: "Estimado para pagamento Pix",
-    },
-  ],
-  olx: [
-    {
-      codigo: "OLXAPP",
-      desc_pct: 5,
-      desc_fixo: 0,
-      tipo: "percentual",
-      condicao: "Estimado para app OLX",
-    },
-  ],
-  enjoei: [
-    {
-      codigo: "PRIMEIROENJOI",
-      desc_pct: 10,
-      desc_fixo: 0,
-      tipo: "percentual",
-      condicao: "Estimado para primeira compra",
-    },
-  ],
 };
 
 function formatarMoeda(valor) {
@@ -164,41 +32,6 @@ function formatarMoeda(valor) {
     style: "currency",
     currency: "BRL",
   });
-}
-
-function encodeBusca(texto) {
-  return encodeURIComponent(texto || "").replaceAll("%20", "+");
-}
-
-function calcPrecoFinal(preco, cupom) {
-  if (!cupom) return preco;
-
-  if (cupom.tipo === "percentual") {
-    return Number((preco * (1 - cupom.desc_pct / 100)).toFixed(2));
-  }
-
-  if (cupom.tipo === "fixo") {
-    return Number(Math.max(0, preco - cupom.desc_fixo).toFixed(2));
-  }
-
-  return preco;
-}
-
-function melhorCupom(lojaId, preco) {
-  const cupons = CUPONS_ESTIMADOS[lojaId] || [];
-  let melhor = null;
-  let menor = preco;
-
-  for (const cupom of cupons) {
-    const final = calcPrecoFinal(preco, cupom);
-
-    if (final < menor) {
-      menor = final;
-      melhor = cupom;
-    }
-  }
-
-  return melhor;
 }
 
 function gerarHistorico(base, dias = 21) {
@@ -221,146 +54,35 @@ function gerarHistorico(base, dias = 21) {
   });
 }
 
-function gerarResultadosLocais(nome, meta, aceitaNovo, aceitaUsado) {
-  const seed = nome
-    .toLowerCase()
-    .split("")
-    .reduce((acc, char) => acc + char.charCodeAt(0), 0);
+const lojaInfo = {
+  mercadolivre: { nome: "Mercado Livre", cor: "#ffe600", bg: "#ffe60015", emoji: "🛒" },
+  amazon: { nome: "Amazon", cor: "#ff9900", bg: "#ff990015", emoji: "📦" },
+  kabum: { nome: "KaBuM!", cor: "#f04e23", bg: "#f04e2315", emoji: "🖥️" },
+  magalu: { nome: "Magalu", cor: "#0086ff", bg: "#0086ff15", emoji: "🛍️" },
+  olx: { nome: "OLX", cor: "#9adc00", bg: "#9adc0015", emoji: "🏷️" },
+  enjoei: { nome: "Enjoei", cor: "#ff69b4", bg: "#ff69b415", emoji: "✨" },
+};
 
-  const base = Math.max(300, Number(meta || 1000) * (1.05 + (seed % 35) / 100));
-
-  const config = [
-    {
-      loja_id: "mercadolivre",
-      fator: 1,
-      condicao: "Novo",
-      url: `https://lista.mercadolivre.com.br/${encodeBusca(nome)}`,
-    },
-    {
-      loja_id: "amazon",
-      fator: 0.96,
-      condicao: "Novo",
-      url: `https://www.amazon.com.br/s?k=${encodeBusca(nome)}`,
-    },
-    {
-      loja_id: "kabum",
-      fator: 0.92,
-      condicao: "Novo",
-      url: `https://www.kabum.com.br/busca/${encodeBusca(nome)}`,
-    },
-    {
-      loja_id: "magalu",
-      fator: 0.98,
-      condicao: "Novo",
-      url: `https://www.magazineluiza.com.br/busca/${encodeBusca(nome)}/`,
-    },
-    {
-      loja_id: "olx",
-      fator: 0.78,
-      condicao: "Usado",
-      url: `https://www.olx.com.br/brasil?q=${encodeBusca(nome)}`,
-    },
-    {
-      loja_id: "enjoei",
-      fator: 0.82,
-      condicao: "Seminovo",
-      url: `https://www.enjoei.com.br/busca?q=${encodeBusca(nome)}`,
-    },
-  ];
-
-  return config
-    .filter((item) => {
-      const ehUsado =
-        item.condicao.toLowerCase().includes("usado") ||
-        item.condicao.toLowerCase().includes("seminovo");
-
-      if (ehUsado && !aceitaUsado) return false;
-      if (!ehUsado && !aceitaNovo) return false;
-
-      return true;
-    })
-    .map((item) => {
-      const loja = LOJAS[item.loja_id];
-      const variacao = 1 + (Math.random() * 0.08 - 0.04);
-      const preco = Number((base * item.fator * variacao).toFixed(2));
-      const cupom = melhorCupom(item.loja_id, preco);
-      const precoFinal = cupom ? calcPrecoFinal(preco, cupom) : preco;
-
-      return {
-        loja_id: item.loja_id,
-        loja: loja.nome,
-        preco,
-        preco_final: precoFinal,
-        titulo: `${nome} - ${loja.nome}`,
-        condicao: item.condicao,
-        url: item.url,
-        melhor_cupom: cupom,
-        cupom_confirmado: false,
-        observacao_cupom: cupom
-          ? "Cupom estimado. Confirme a validade no checkout da loja."
-          : "",
-        link_tipo: "busca",
-      };
-    })
-    .sort((a, b) => a.preco_final - b.preco_final);
-}
-
-function normalizarResultadosBackend(resultados) {
-  return (resultados || [])
-    .map((r) => {
-      const preco = Number(r.preco || 0);
-      const precoFinal = Number(r.preco_final || r.preco || 0);
-      const cupom = r.melhor_cupom || null;
-
-      return {
-        loja_id: r.loja_id,
-        loja: r.loja || LOJAS[r.loja_id]?.nome || r.loja_id || "Loja",
-        preco,
-        preco_final: precoFinal,
-        titulo: r.titulo || "Produto encontrado",
-        condicao: r.condicao || "Não informado",
-        url: r.url || "",
-        melhor_cupom: cupom,
-        cupom_confirmado: Boolean(r.cupom_confirmado),
-        observacao_cupom:
-          r.observacao_cupom ||
-          (cupom ? "Cupom estimado. Confirme no checkout da loja." : ""),
-        link_tipo:
-          r.url && !r.url.includes("/busca") && !r.url.includes("search") && !r.url.includes("?q=")
-            ? "produto"
-            : "busca",
-      };
-    })
-    .sort((a, b) => a.preco_final - b.preco_final);
-}
-
-function Chip({ children, color = T.cyan, bg, style = {} }) {
-  return (
-    <span
-      style={{
-        background: bg || `${color}20`,
-        color,
-        fontSize: 11,
-        fontWeight: 800,
-        padding: "4px 9px",
-        borderRadius: 999,
-        border: `1px solid ${color}35`,
-        whiteSpace: "nowrap",
-        ...style,
-      }}
-    >
-      {children}
-    </span>
-  );
-}
+const Chip = ({ children, color = T.cyan, bg, style = {} }) => (
+  <span
+    style={{
+      background: bg || `${color}20`,
+      color,
+      fontSize: 11,
+      fontWeight: 800,
+      padding: "4px 9px",
+      borderRadius: 999,
+      border: `1px solid ${color}35`,
+      whiteSpace: "nowrap",
+      ...style,
+    }}
+  >
+    {children}
+  </span>
+);
 
 function LojaTag({ id, nome }) {
-  const loja = LOJAS[id] || {
-    nome: nome || "Loja",
-    cor: T.cyan,
-    bg: T.cyanDim,
-    emoji: "🏬",
-  };
+  const loja = lojaInfo[id] || { nome: nome || id, cor: T.cyan, bg: T.cyanDim, emoji: "🏬" };
 
   return (
     <Chip color={loja.cor} bg={loja.bg}>
@@ -457,15 +179,11 @@ function TelaBusca({ onBuscar, carregando, erro }) {
       <div style={{ width: "100%", maxWidth: 520, position: "relative" }}>
         <div
           style={{
-            position: "absolute",
-            inset: "-120px -80px auto",
-            height: 280,
-            background: `radial-gradient(circle, ${T.cyan}17, transparent 65%)`,
-            pointerEvents: "none",
+            textAlign: "center",
+            marginBottom: 28,
+            position: "relative",
           }}
-        />
-
-        <div style={{ textAlign: "center", marginBottom: 28, position: "relative" }}>
+        >
           <div style={{ fontSize: 48, marginBottom: 8 }}>🎯</div>
 
           <h1
@@ -491,7 +209,6 @@ function TelaBusca({ onBuscar, carregando, erro }) {
             borderRadius: 24,
             padding: "clamp(18px, 5vw, 28px)",
             boxShadow: `0 0 90px ${T.cyan}12`,
-            position: "relative",
           }}
         >
           <label style={labelStyle}>Produto</label>
@@ -533,7 +250,14 @@ function TelaBusca({ onBuscar, carregando, erro }) {
             style={inputStyle}
           />
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+          <div
+            style={{
+              display: "flex",
+              gap: 10,
+              flexWrap: "wrap",
+              marginBottom: 16,
+            }}
+          >
             <label style={{ color: T.text, fontSize: 14 }}>
               <input
                 type="checkbox"
@@ -574,14 +298,7 @@ function TelaBusca({ onBuscar, carregando, erro }) {
           </button>
 
           {erro && (
-            <div
-              style={{
-                color: T.red,
-                marginTop: 13,
-                fontSize: 13,
-                textAlign: "center",
-              }}
-            >
+            <div style={{ color: T.red, marginTop: 13, fontSize: 13, textAlign: "center" }}>
               {erro}
             </div>
           )}
@@ -595,56 +312,27 @@ function TelaBusca({ onBuscar, carregando, erro }) {
   );
 }
 
-function Resumo({ label, value, color = T.text }) {
-  return (
-    <div
-      style={{
-        background: T.card,
-        border: `1px solid ${T.border}`,
-        borderRadius: 18,
-        padding: 16,
-        display: "flex",
-        flexDirection: "column",
-        gap: 6,
-      }}
-    >
-      <span
-        style={{
-          color: T.muted,
-          fontSize: 12,
-          textTransform: "uppercase",
-          letterSpacing: 1,
-          fontWeight: 900,
-        }}
-      >
-        {label}
-      </span>
-      <strong style={{ color, fontSize: 20 }}>{value}</strong>
-    </div>
-  );
-}
-
 function PainelResultado({ dados, meta, onNovaBusca }) {
   const [lojaAtiva, setLojaAtiva] = useState(null);
   const [aba, setAba] = useState("precos");
 
   const resultados = useMemo(() => {
-    return normalizarResultadosBackend(dados.resultados)
+    return (dados.resultados || [])
       .map((r) => ({
         ...r,
-        historico: gerarHistorico(r.preco_final),
+        precoFinal: Number(r.preco_final || r.preco),
+        historico: gerarHistorico(Number(r.preco_final || r.preco)),
       }))
-      .sort((a, b) => a.preco_final - b.preco_final);
+      .sort((a, b) => a.precoFinal - b.precoFinal);
   }, [dados]);
 
   useEffect(() => {
-    if (!lojaAtiva && resultados[0]) {
-      setLojaAtiva(resultados[0].loja_id);
-    }
+    if (!lojaAtiva && resultados[0]) setLojaAtiva(resultados[0].loja_id);
   }, [resultados, lojaAtiva]);
 
   const ativo = resultados.find((r) => r.loja_id === lojaAtiva) || resultados[0];
-  const lojaConf = LOJAS[ativo?.loja_id] || { cor: T.cyan };
+  const lojaConf = lojaInfo[ativo?.loja_id] || { cor: T.cyan };
+
   const melhor = resultados[0];
 
   return (
@@ -699,12 +387,6 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                 </span>
               )}
             </div>
-
-            {dados.modo_local && (
-              <div style={{ color: T.orange, fontSize: 13, marginTop: 8 }}>
-                ⚠️ Backend indisponível. Mostrando simulação local para manter o painel ativo.
-              </div>
-            )}
           </div>
 
           <button
@@ -745,17 +427,13 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                 marginBottom: 16,
               }}
             >
-              <Resumo
-                label="Melhor preço"
-                value={formatarMoeda(melhor?.preco_final)}
-                color={T.green}
-              />
+              <Resumo label="Melhor preço" value={formatarMoeda(melhor?.precoFinal)} color={T.green} />
               <Resumo label="Loja destaque" value={melhor?.loja || "-"} />
               <Resumo label="Condição" value={melhor?.condicao || "-"} />
               <Resumo
                 label="Status"
-                value={melhor?.preco_final <= meta ? "Dentro da meta" : "Monitorando"}
-                color={melhor?.preco_final <= meta ? T.green : T.orange}
+                value={melhor?.precoFinal <= meta ? "Dentro da meta" : "Monitorando"}
+                color={melhor?.precoFinal <= meta ? T.green : T.orange}
               />
             </section>
 
@@ -803,12 +481,8 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                   }}
                 >
                   {resultados.map((r, index) => {
-                    const loja = LOJAS[r.loja_id] || {
-                      cor: T.cyan,
-                      bg: T.cyanDim,
-                    };
-
-                    const atingiu = r.preco_final <= meta;
+                    const loja = lojaInfo[r.loja_id] || { cor: T.cyan, bg: T.cyanDim };
+                    const atingiu = r.precoFinal <= meta;
                     const selecionada = lojaAtiva === r.loja_id;
 
                     return (
@@ -817,9 +491,7 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                         onClick={() => setLojaAtiva(r.loja_id)}
                         style={{
                           background: selecionada ? T.cardAlt : T.card,
-                          border: `1.5px solid ${
-                            selecionada ? `${loja.cor}70` : T.border
-                          }`,
+                          border: `1.5px solid ${selecionada ? `${loja.cor}70` : T.border}`,
                           borderRadius: 18,
                           padding: 16,
                           color: T.text,
@@ -827,22 +499,10 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                           boxShadow: selecionada ? `0 0 24px ${loja.cor}16` : "none",
                         }}
                       >
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: 7,
-                            flexWrap: "wrap",
-                            marginBottom: 9,
-                          }}
-                        >
+                        <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 9 }}>
                           <LojaTag id={r.loja_id} nome={r.loja} />
                           {index === 0 && <Chip color={T.green}>🏆 Melhor</Chip>}
                           {atingiu && <Chip color={T.green}>✅ Meta</Chip>}
-                          {r.link_tipo === "produto" ? (
-                            <Chip color={T.green}>🔗 Produto</Chip>
-                          ) : (
-                            <Chip color={T.orange}>🔎 Busca</Chip>
-                          )}
                         </div>
 
                         <div
@@ -853,10 +513,10 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                             marginBottom: 6,
                           }}
                         >
-                          {formatarMoeda(r.preco_final)}
+                          {formatarMoeda(r.precoFinal)}
                         </div>
 
-                        {r.preco_final !== Number(r.preco) && (
+                        {r.precoFinal !== Number(r.preco) && (
                           <div style={{ color: T.muted, fontSize: 13, marginBottom: 5 }}>
                             Preço base: {formatarMoeda(r.preco)}
                           </div>
@@ -878,30 +538,24 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                           </div>
                         )}
 
-                        {r.url ? (
-                          <a
-                            href={r.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            onClick={(e) => e.stopPropagation()}
-                            style={{
-                              display: "inline-block",
-                              marginTop: 12,
-                              color: "#000",
-                              background: loja.cor || T.cyan,
-                              padding: "9px 12px",
-                              borderRadius: 10,
-                              textDecoration: "none",
-                              fontWeight: 900,
-                            }}
-                          >
-                            {r.link_tipo === "produto" ? "Ver produto →" : "Ver busca →"}
-                          </a>
-                        ) : (
-                          <div style={{ color: T.muted, marginTop: 12, fontSize: 13 }}>
-                            Link não encontrado
-                          </div>
-                        )}
+                        <a
+                          href={r.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          style={{
+                            display: "inline-block",
+                            marginTop: 12,
+                            color: "#000",
+                            background: loja.cor || T.cyan,
+                            padding: "9px 12px",
+                            borderRadius: 10,
+                            textDecoration: "none",
+                            fontWeight: 900,
+                          }}
+                        >
+                          Ver produto →
+                        </a>
                       </div>
                     );
                   })}
@@ -933,40 +587,28 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                         </h2>
                       </div>
 
-                      {ativo.url && (
-                        <a
-                          href={ativo.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          style={{
-                            background: lojaConf.cor || T.cyan,
-                            color: "#000",
-                            padding: "10px 14px",
-                            borderRadius: 10,
-                            textDecoration: "none",
-                            fontWeight: 950,
-                          }}
-                        >
-                          {ativo.link_tipo === "produto" ? "Abrir produto →" : "Abrir busca →"}
-                        </a>
-                      )}
+                      <a
+                        href={ativo.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{
+                          background: lojaConf.cor || T.cyan,
+                          color: "#000",
+                          padding: "10px 14px",
+                          borderRadius: 10,
+                          textDecoration: "none",
+                          fontWeight: 950,
+                        }}
+                      >
+                        Abrir produto →
+                      </a>
                     </div>
 
                     <div style={{ height: 260 }}>
                       <ResponsiveContainer width="100%" height="100%">
                         <LineChart data={ativo.historico}>
-                          <XAxis
-                            dataKey="data"
-                            tick={{ fontSize: 11, fill: T.dim }}
-                            axisLine={false}
-                            tickLine={false}
-                          />
-                          <YAxis
-                            tick={{ fontSize: 11, fill: T.dim }}
-                            axisLine={false}
-                            tickLine={false}
-                            width={70}
-                          />
+                          <XAxis dataKey="data" tick={{ fontSize: 11, fill: T.dim }} axisLine={false} tickLine={false} />
+                          <YAxis tick={{ fontSize: 11, fill: T.dim }} axisLine={false} tickLine={false} width={70} />
                           <Tooltip content={<TooltipChart />} />
                           <ReferenceLine y={meta} stroke={T.green} strokeDasharray="4 4" />
                           <Line
@@ -995,25 +637,17 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                 }}
               >
                 <h2 style={{ marginTop: 0 }}>Cupons estimados</h2>
-
                 <p style={{ color: T.muted, lineHeight: 1.6 }}>
-                  Sem API oficial de cupons das lojas, o sistema não consegue garantir que
-                  um cupom esteja ativo. Por isso, eles aparecem como estimativa e devem
-                  ser testados no checkout.
+                  Sem API oficial de cupons das lojas, o sistema não consegue garantir que um cupom esteja ativo.
+                  Por isso, eles aparecem como estimativa e devem ser testados no checkout.
                 </p>
 
                 <div style={{ display: "grid", gap: 10 }}>
-                  {resultados.filter((r) => r.melhor_cupom).length === 0 && (
-                    <div style={{ color: T.muted }}>
-                      Nenhum cupom estimado para os resultados atuais.
-                    </div>
-                  )}
-
                   {resultados
                     .filter((r) => r.melhor_cupom)
-                    .map((r, index) => (
+                    .map((r) => (
                       <div
-                        key={`cupom-${r.loja_id}-${index}`}
+                        key={`cupom-${r.loja_id}`}
                         style={{
                           background: T.cardAlt,
                           border: `1px solid ${T.border}`,
@@ -1022,36 +656,27 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
                         }}
                       >
                         <LojaTag id={r.loja_id} nome={r.loja} />
-
                         <div style={{ marginTop: 10 }}>
-                          Cupom:{" "}
-                          <b style={{ color: T.orange }}>{r.melhor_cupom.codigo}</b>
+                          Cupom: <b style={{ color: T.orange }}>{r.melhor_cupom.codigo}</b>
                         </div>
-
-                        <div>
-                          Preço estimado: <b>{formatarMoeda(r.preco_final)}</b>
-                        </div>
-
+                        <div>Preço estimado: <b>{formatarMoeda(r.precoFinal)}</b></div>
                         <div style={{ color: T.muted, fontSize: 13 }}>
                           {r.melhor_cupom.condicao}
                         </div>
-
-                        {r.url && (
-                          <a
-                            href={r.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            style={{
-                              display: "inline-block",
-                              marginTop: 10,
-                              color: T.cyan,
-                              fontWeight: 900,
-                              textDecoration: "none",
-                            }}
-                          >
-                            Testar no site →
-                          </a>
-                        )}
+                        <a
+                          href={r.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{
+                            display: "inline-block",
+                            marginTop: 10,
+                            color: T.cyan,
+                            fontWeight: 900,
+                            textDecoration: "none",
+                          }}
+                        >
+                          Testar no site →
+                        </a>
                       </div>
                     ))}
                 </div>
@@ -1091,6 +716,35 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
   );
 }
 
+function Resumo({ label, value, color = T.text }) {
+  return (
+    <div
+      style={{
+        background: T.card,
+        border: `1px solid ${T.border}`,
+        borderRadius: 18,
+        padding: 16,
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+      }}
+    >
+      <span
+        style={{
+          color: T.muted,
+          fontSize: 12,
+          textTransform: "uppercase",
+          letterSpacing: 1,
+          fontWeight: 900,
+        }}
+      >
+        {label}
+      </span>
+      <strong style={{ color, fontSize: 20 }}>{value}</strong>
+    </div>
+  );
+}
+
 export default function App() {
   const [tela, setTela] = useState("busca");
   const [carregando, setCarregando] = useState(false);
@@ -1098,12 +752,9 @@ export default function App() {
   const [dados, setDados] = useState(null);
   const [meta, setMeta] = useState(0);
 
-  async function buscarNoBackend(form) {
-    const controller = new AbortController();
-
-    const timer = setTimeout(() => {
-      controller.abort();
-    }, 15000);
+  async function handleBuscar(form) {
+    setCarregando(true);
+    setErro("");
 
     try {
       const response = await fetch(`${API_URL}/buscar`, {
@@ -1111,7 +762,6 @@ export default function App() {
         headers: {
           "Content-Type": "application/json",
         },
-        signal: controller.signal,
         body: JSON.stringify({
           nome: form.nome,
           preco_meta: form.meta,
@@ -1124,57 +774,18 @@ export default function App() {
         }),
       });
 
-      clearTimeout(timer);
-
       if (!response.ok) {
-        throw new Error(`Erro HTTP ${response.status}`);
+        throw new Error("Erro na API");
       }
 
-      return await response.json();
-    } catch (error) {
-      clearTimeout(timer);
-      throw error;
-    }
-  }
+      const data = await response.json();
 
-  async function handleBuscar(form) {
-    setCarregando(true);
-    setErro("");
-
-    try {
-      const data = await buscarNoBackend(form);
-
-      setDados({
-        ...data,
-        resultados: normalizarResultadosBackend(data.resultados),
-        modo_local: false,
-      });
-
+      setDados(data);
       setMeta(form.meta);
       setTela("resultado");
     } catch (error) {
-      console.error("Backend falhou. Usando fallback local:", error);
-
-      const resultadosLocais = gerarResultadosLocais(
-        form.nome,
-        form.meta,
-        form.aceitaNovo,
-        form.aceitaUsado
-      );
-
-      setDados({
-        id: null,
-        produto_normalizado: form.nome,
-        meta: form.meta,
-        email: form.email,
-        resultados: resultadosLocais,
-        modo_local: true,
-        analise:
-          "O backend Railway não respondeu agora, então o painel foi carregado em modo de simulação local. Para alertas por email e links reais de produto, publique o backend com a rota /buscar atualizada.",
-      });
-
-      setMeta(form.meta);
-      setTela("resultado");
+      console.error(error);
+      setErro("Erro ao buscar produto. Confira se o backend Railway está online.");
     } finally {
       setCarregando(false);
     }
