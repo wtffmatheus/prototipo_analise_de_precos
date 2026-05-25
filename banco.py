@@ -1,154 +1,331 @@
 import sqlite3
-from pathlib import Path
 
 DB = "monitor.db"
+
 
 def conectar():
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
     return con
 
+
+def coluna_existe(con, tabela, coluna):
+    rows = con.execute(f"PRAGMA table_info({tabela})").fetchall()
+    return any(row["name"] == coluna for row in rows)
+
+
+def garantir_colunas_produtos(con):
+    """
+    Garante compatibilidade com bancos antigos.
+    Se a tabela produtos já existir sem os campos novos,
+    eles serão adicionados automaticamente.
+    """
+
+    novas_colunas = [
+        ("email", "TEXT DEFAULT ''"),
+        ("alerta_proximo_pct", "REAL DEFAULT 10"),
+        ("aceita_usado", "INTEGER DEFAULT 1"),
+        ("aceita_novo", "INTEGER DEFAULT 1"),
+    ]
+
+    for coluna, tipo in novas_colunas:
+        if not coluna_existe(con, "produtos", coluna):
+            con.execute(f"ALTER TABLE produtos ADD COLUMN {coluna} {tipo}")
+
+
 def criar_tabelas():
     con = conectar()
+
     con.executescript("""
         CREATE TABLE IF NOT EXISTS produtos (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome          TEXT NOT NULL,
-            preco_meta    REAL NOT NULL,
-            cupom         TEXT DEFAULT '',
-            desconto_pct  REAL DEFAULT 0,
-            ativo         INTEGER DEFAULT 1,
-            criado_em     TEXT DEFAULT (datetime('now','localtime'))
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome                TEXT NOT NULL,
+            preco_meta          REAL NOT NULL,
+            email               TEXT DEFAULT '',
+            cupom               TEXT DEFAULT '',
+            desconto_pct        REAL DEFAULT 0,
+            alerta_proximo_pct  REAL DEFAULT 10,
+            aceita_usado        INTEGER DEFAULT 1,
+            aceita_novo         INTEGER DEFAULT 1,
+            ativo               INTEGER DEFAULT 1,
+            criado_em           TEXT DEFAULT (datetime('now','localtime'))
         );
 
         CREATE TABLE IF NOT EXISTS historico (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            produto_id INTEGER NOT NULL,
-            loja       TEXT NOT NULL,
-            loja_id    TEXT NOT NULL,
-            preco      REAL NOT NULL,
-            condicao   TEXT DEFAULT 'Novo',
-            url        TEXT DEFAULT '',
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            produto_id  INTEGER NOT NULL,
+            loja        TEXT NOT NULL,
+            loja_id     TEXT NOT NULL,
+            preco       REAL NOT NULL,
+            condicao    TEXT DEFAULT 'Novo',
+            url         TEXT DEFAULT '',
             coletado_em TEXT DEFAULT (datetime('now','localtime')),
             FOREIGN KEY (produto_id) REFERENCES produtos(id)
         );
 
         CREATE TABLE IF NOT EXISTS alertas_enviados (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            produto_id INTEGER NOT NULL,
-            chave      TEXT UNIQUE,
-            enviado_em TEXT DEFAULT (datetime('now','localtime'))
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            produto_id  INTEGER NOT NULL,
+            chave       TEXT UNIQUE,
+            enviado_em  TEXT DEFAULT (datetime('now','localtime'))
         );
     """)
+
+    garantir_colunas_produtos(con)
+
     con.commit()
     con.close()
 
+
 # ── PRODUTOS ──────────────────────────────────────────────────────────────────
+
 def listar_produtos():
     con = conectar()
-    rows = con.execute("SELECT * FROM produtos WHERE ativo = 1 ORDER BY criado_em DESC").fetchall()
+    rows = con.execute("""
+        SELECT *
+        FROM produtos
+        WHERE ativo = 1
+        ORDER BY criado_em DESC
+    """).fetchall()
     con.close()
     return [dict(r) for r in rows]
+
 
 def buscar_produto(produto_id: int):
     con = conectar()
-    row = con.execute("SELECT * FROM produtos WHERE id = ?", (produto_id,)).fetchone()
+    row = con.execute("""
+        SELECT *
+        FROM produtos
+        WHERE id = ?
+    """, (produto_id,)).fetchone()
     con.close()
     return dict(row) if row else None
 
-def inserir_produto(nome, preco_meta, cupom="", desconto_pct=0):
+
+def inserir_produto(
+    nome,
+    preco_meta,
+    email="",
+    cupom="",
+    desconto_pct=0,
+    alerta_proximo_pct=10,
+    aceita_usado=True,
+    aceita_novo=True,
+):
     con = conectar()
-    cur = con.execute(
-        "INSERT INTO produtos (nome, preco_meta, cupom, desconto_pct) VALUES (?, ?, ?, ?)",
-        (nome, preco_meta, cupom, desconto_pct)
-    )
+
+    cur = con.execute("""
+        INSERT INTO produtos (
+            nome,
+            preco_meta,
+            email,
+            cupom,
+            desconto_pct,
+            alerta_proximo_pct,
+            aceita_usado,
+            aceita_novo
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        nome,
+        preco_meta,
+        email,
+        cupom,
+        desconto_pct,
+        alerta_proximo_pct,
+        1 if aceita_usado else 0,
+        1 if aceita_novo else 0,
+    ))
+
     con.commit()
     produto_id = cur.lastrowid
     con.close()
+
     return produto_id
 
-def atualizar_produto(produto_id, nome, preco_meta, cupom, desconto_pct):
+
+def atualizar_produto(
+    produto_id,
+    nome,
+    preco_meta,
+    email="",
+    cupom="",
+    desconto_pct=0,
+    alerta_proximo_pct=10,
+    aceita_usado=True,
+    aceita_novo=True,
+):
     con = conectar()
-    con.execute(
-        "UPDATE produtos SET nome=?, preco_meta=?, cupom=?, desconto_pct=? WHERE id=?",
-        (nome, preco_meta, cupom, desconto_pct, produto_id)
-    )
+
+    con.execute("""
+        UPDATE produtos
+        SET
+            nome = ?,
+            preco_meta = ?,
+            email = ?,
+            cupom = ?,
+            desconto_pct = ?,
+            alerta_proximo_pct = ?,
+            aceita_usado = ?,
+            aceita_novo = ?
+        WHERE id = ?
+    """, (
+        nome,
+        preco_meta,
+        email,
+        cupom,
+        desconto_pct,
+        alerta_proximo_pct,
+        1 if aceita_usado else 0,
+        1 if aceita_novo else 0,
+        produto_id,
+    ))
+
     con.commit()
     con.close()
+
 
 def deletar_produto(produto_id):
     con = conectar()
-    con.execute("UPDATE produtos SET ativo = 0 WHERE id = ?", (produto_id,))
+    con.execute("""
+        UPDATE produtos
+        SET ativo = 0
+        WHERE id = ?
+    """, (produto_id,))
     con.commit()
     con.close()
 
+
 # ── HISTÓRICO ─────────────────────────────────────────────────────────────────
+
 def inserir_historico(produto_id, loja, loja_id, preco, condicao, url):
     con = conectar()
-    con.execute(
-        "INSERT INTO historico (produto_id, loja, loja_id, preco, condicao, url) VALUES (?,?,?,?,?,?)",
-        (produto_id, loja, loja_id, preco, condicao, url)
-    )
+
+    con.execute("""
+        INSERT INTO historico (
+            produto_id,
+            loja,
+            loja_id,
+            preco,
+            condicao,
+            url
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        produto_id,
+        loja,
+        loja_id,
+        preco,
+        condicao,
+        url,
+    ))
+
     con.commit()
     con.close()
+
 
 def historico_produto(produto_id, loja_id=None, limite=30):
     con = conectar()
+
     if loja_id:
-        rows = con.execute(
-            "SELECT * FROM historico WHERE produto_id=? AND loja_id=? ORDER BY coletado_em DESC LIMIT ?",
-            (produto_id, loja_id, limite)
-        ).fetchall()
+        rows = con.execute("""
+            SELECT *
+            FROM historico
+            WHERE produto_id = ?
+              AND loja_id = ?
+            ORDER BY coletado_em DESC
+            LIMIT ?
+        """, (produto_id, loja_id, limite)).fetchall()
     else:
-        rows = con.execute(
-            "SELECT * FROM historico WHERE produto_id=? ORDER BY coletado_em DESC LIMIT ?",
-            (produto_id, limite)
-        ).fetchall()
+        rows = con.execute("""
+            SELECT *
+            FROM historico
+            WHERE produto_id = ?
+            ORDER BY coletado_em DESC
+            LIMIT ?
+        """, (produto_id, limite)).fetchall()
+
     con.close()
     return [dict(r) for r in rows]
 
+
 def menor_preco_historico(produto_id, loja_id=None):
     con = conectar()
+
     if loja_id:
-        row = con.execute(
-            "SELECT MIN(preco) as menor FROM historico WHERE produto_id=? AND loja_id=?",
-            (produto_id, loja_id)
-        ).fetchone()
+        row = con.execute("""
+            SELECT MIN(preco) as menor
+            FROM historico
+            WHERE produto_id = ?
+              AND loja_id = ?
+        """, (produto_id, loja_id)).fetchone()
     else:
-        row = con.execute(
-            "SELECT MIN(preco) as menor FROM historico WHERE produto_id=?",
-            (produto_id,)
-        ).fetchone()
+        row = con.execute("""
+            SELECT MIN(preco) as menor
+            FROM historico
+            WHERE produto_id = ?
+        """, (produto_id,)).fetchone()
+
     con.close()
     return row["menor"] if row else None
 
+
 def ultimo_preco(produto_id, loja_id):
     con = conectar()
-    row = con.execute(
-        "SELECT preco FROM historico WHERE produto_id=? AND loja_id=? ORDER BY coletado_em DESC LIMIT 1",
-        (produto_id, loja_id)
-    ).fetchone()
+
+    row = con.execute("""
+        SELECT preco
+        FROM historico
+        WHERE produto_id = ?
+          AND loja_id = ?
+        ORDER BY coletado_em DESC
+        LIMIT 1
+    """, (produto_id, loja_id)).fetchone()
+
     con.close()
     return row["preco"] if row else None
 
+
 # ── ALERTAS ───────────────────────────────────────────────────────────────────
+
 def alerta_ja_enviado(chave: str) -> bool:
     con = conectar()
-    row = con.execute("SELECT id FROM alertas_enviados WHERE chave=?", (chave,)).fetchone()
+
+    row = con.execute("""
+        SELECT id
+        FROM alertas_enviados
+        WHERE chave = ?
+    """, (chave,)).fetchone()
+
     con.close()
     return row is not None
 
+
 def registrar_alerta(produto_id: int, chave: str):
     con = conectar()
+
     try:
-        con.execute("INSERT INTO alertas_enviados (produto_id, chave) VALUES (?,?)", (produto_id, chave))
+        con.execute("""
+            INSERT INTO alertas_enviados (
+                produto_id,
+                chave
+            )
+            VALUES (?, ?)
+        """, (produto_id, chave))
         con.commit()
     except sqlite3.IntegrityError:
         pass
+
     con.close()
+
 
 def limpar_alertas_produto(produto_id: int):
     con = conectar()
-    con.execute("DELETE FROM alertas_enviados WHERE produto_id=?", (produto_id,))
+
+    con.execute("""
+        DELETE FROM alertas_enviados
+        WHERE produto_id = ?
+    """, (produto_id,))
+
     con.commit()
     con.close()
