@@ -1,12 +1,13 @@
 import os
 import re
+import json
 import smtplib
 import logging
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urljoin
 
 from dotenv import load_dotenv
 import requests
@@ -27,112 +28,364 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "pt-BR,pt;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
 
-# ATENÇÃO:
-# Estes cupons são estimativas/sugestões. Sem API oficial das lojas, não dá para garantir validade.
-# O sistema mostra preço final estimado e recomenda confirmar o cupom no checkout.
+LOJAS_NOMES = {
+    "mercadolivre": "Mercado Livre",
+    "amazon": "Amazon",
+    "kabum": "KaBuM!",
+    "magalu": "Magalu",
+    "olx": "OLX",
+    "enjoei": "Enjoei",
+}
+
+# Base interna de possíveis cupons.
+# Importante: NÃO são aplicados automaticamente ao preço final.
+# Eles aparecem como "possíveis" e precisam ser testados no checkout.
 CUPONS_BASE = {
     "mercadolivre": [
-        {"codigo": "MELI5", "desc_pct": 5, "desc_fixo": 0, "condicao": "Cupom estimado Mercado Livre", "tipo": "percentual"},
-        {"codigo": "APPML10", "desc_pct": 10, "desc_fixo": 0, "condicao": "Estimado para compra pelo app", "tipo": "percentual"},
+        {
+            "codigo": "MELI5",
+            "desc_pct": 5,
+            "desc_fixo": 0,
+            "tipo": "percentual",
+            "condicao": "Possível cupom para compras selecionadas.",
+            "origem": "base interna",
+            "confianca": "baixa",
+            "verificado": False,
+        },
+        {
+            "codigo": "APPML10",
+            "desc_pct": 10,
+            "desc_fixo": 0,
+            "tipo": "percentual",
+            "condicao": "Possível desconto em compras pelo app.",
+            "origem": "base interna",
+            "confianca": "baixa",
+            "verificado": False,
+        },
     ],
     "amazon": [
-        {"codigo": "APP10", "desc_pct": 10, "desc_fixo": 0, "condicao": "Cupom estimado Amazon App", "tipo": "percentual"},
-        {"codigo": "PRIME30", "desc_pct": 0, "desc_fixo": 30, "condicao": "Estimado para assinantes Prime", "tipo": "fixo"},
+        {
+            "codigo": "APP10",
+            "desc_pct": 10,
+            "desc_fixo": 0,
+            "tipo": "percentual",
+            "condicao": "Possível desconto em compras pelo app.",
+            "origem": "base interna",
+            "confianca": "baixa",
+            "verificado": False,
+        },
+        {
+            "codigo": "PRIME30",
+            "desc_pct": 0,
+            "desc_fixo": 30,
+            "tipo": "fixo",
+            "condicao": "Possível desconto para clientes Prime ou campanha selecionada.",
+            "origem": "base interna",
+            "confianca": "baixa",
+            "verificado": False,
+        },
     ],
     "kabum": [
-        {"codigo": "KABUM10", "desc_pct": 10, "desc_fixo": 0, "condicao": "Estimado para Pix/Boleto", "tipo": "percentual"},
-        {"codigo": "KABUM5", "desc_pct": 5, "desc_fixo": 0, "condicao": "Cupom estimado KaBuM", "tipo": "percentual"},
+        {
+            "codigo": "KABUM10",
+            "desc_pct": 10,
+            "desc_fixo": 0,
+            "tipo": "percentual",
+            "condicao": "Possível cupom para Pix, boleto ou campanha específica.",
+            "origem": "base interna",
+            "confianca": "baixa",
+            "verificado": False,
+        },
+        {
+            "codigo": "KABUM5",
+            "desc_pct": 5,
+            "desc_fixo": 0,
+            "tipo": "percentual",
+            "condicao": "Possível cupom para produtos selecionados.",
+            "origem": "base interna",
+            "confianca": "baixa",
+            "verificado": False,
+        },
     ],
     "magalu": [
-        {"codigo": "APP15", "desc_pct": 15, "desc_fixo": 0, "condicao": "Estimado para app Magalu", "tipo": "percentual"},
-        {"codigo": "PIX5", "desc_pct": 5, "desc_fixo": 0, "condicao": "Estimado para Pix", "tipo": "percentual"},
+        {
+            "codigo": "APP15",
+            "desc_pct": 15,
+            "desc_fixo": 0,
+            "tipo": "percentual",
+            "condicao": "Possível cupom para app Magalu.",
+            "origem": "base interna",
+            "confianca": "baixa",
+            "verificado": False,
+        },
+        {
+            "codigo": "PIX5",
+            "desc_pct": 5,
+            "desc_fixo": 0,
+            "tipo": "percentual",
+            "condicao": "Possível desconto via Pix.",
+            "origem": "base interna",
+            "confianca": "baixa",
+            "verificado": False,
+        },
     ],
     "olx": [
-        {"codigo": "OLXAPP", "desc_pct": 5, "desc_fixo": 0, "condicao": "Estimado para app OLX", "tipo": "percentual"},
+        {
+            "codigo": "OLXAPP",
+            "desc_pct": 5,
+            "desc_fixo": 0,
+            "tipo": "percentual",
+            "condicao": "Possível cupom no app OLX, quando disponível.",
+            "origem": "base interna",
+            "confianca": "baixa",
+            "verificado": False,
+        },
     ],
     "enjoei": [
-        {"codigo": "PRIMEIROENJOI", "desc_pct": 10, "desc_fixo": 0, "condicao": "Estimado para primeira compra", "tipo": "percentual"},
+        {
+            "codigo": "PRIMEIROENJOI",
+            "desc_pct": 10,
+            "desc_fixo": 0,
+            "tipo": "percentual",
+            "condicao": "Possível cupom de primeira compra.",
+            "origem": "base interna",
+            "confianca": "baixa",
+            "verificado": False,
+        },
     ],
 }
+
+
+def get_html(url: str, timeout: int = 20) -> Optional[str]:
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+
+        if resp.status_code >= 400:
+            log.warning(f"HTTP {resp.status_code} em {url}")
+            return None
+
+        return resp.text
+
+    except Exception as e:
+        log.warning(f"Falha ao acessar {url}: {e}")
+        return None
 
 
 def limpar_preco(texto: str) -> Optional[float]:
     if not texto:
         return None
 
+    texto = str(texto)
     texto = texto.replace("\xa0", " ")
-    nums = re.sub(r"[^\d,\.]", "", texto)
+    texto = texto.replace("R$", " ")
+    texto = texto.strip()
 
-    if "," in nums:
-        nums = nums.replace(".", "").replace(",", ".")
+    match = re.search(r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d{1,3}(?:\.\d{3})+|\d+(?:,\d{2})?)", texto)
+
+    if not match:
+        return None
+
+    valor = match.group(1)
+
+    if "," in valor:
+        valor = valor.replace(".", "").replace(",", ".")
     else:
-        # Ex: 1.299 -> 1299
-        partes = nums.split(".")
-        if len(partes) > 2 or (len(partes) == 2 and len(partes[-1]) == 3):
-            nums = "".join(partes)
+        partes = valor.split(".")
+
+        if len(partes) > 1 and len(partes[-1]) == 3:
+            valor = "".join(partes)
 
     try:
-        preco = float(nums)
+        preco = float(valor)
         return preco if preco > 0 else None
     except ValueError:
         return None
 
 
-def normalizar_url(base, href, fallback):
+def normalizar_url(base: str, href: str, fallback: str) -> str:
     if not href:
         return fallback
+
+    href = href.strip()
 
     if href.startswith("http"):
         return href
 
-    if href.startswith("/"):
-        return base.rstrip("/") + href
+    return urljoin(base, href)
 
-    return fallback
+
+def detectar_tipo_link(url: str) -> str:
+    if not url:
+        return "sem_link"
+
+    u = url.lower()
+
+    padroes_busca = [
+        "/busca",
+        "search",
+        "?q=",
+        "/s?k=",
+        "lista.mercadolivre",
+        "olx.com.br/brasil",
+        "enjoei.com.br/busca",
+    ]
+
+    if any(p in u for p in padroes_busca):
+        return "busca"
+
+    return "produto"
+
+
+def titulo_parece_relevante(titulo: str, nome: str) -> bool:
+    if not titulo or not nome:
+        return True
+
+    titulo_l = titulo.lower()
+    termos = [t for t in re.split(r"\s+", nome.lower()) if len(t) >= 3]
+
+    if not termos:
+        return True
+
+    encontrados = sum(1 for t in termos if t in titulo_l)
+
+    return encontrados >= max(1, min(2, len(termos)))
 
 
 def calc_preco_final(preco, cupom):
     if not cupom:
-        return preco
+        return round(float(preco), 2)
 
-    if cupom["tipo"] == "percentual":
-        return round(preco * (1 - cupom["desc_pct"] / 100), 2)
+    if cupom.get("tipo") == "percentual":
+        return round(float(preco) * (1 - float(cupom.get("desc_pct", 0)) / 100), 2)
 
-    if cupom["tipo"] == "fixo":
-        return round(max(0, preco - cupom["desc_fixo"]), 2)
+    if cupom.get("tipo") == "fixo":
+        return round(max(0, float(preco) - float(cupom.get("desc_fixo", 0))), 2)
 
-    return preco
+    return round(float(preco), 2)
 
 
-def melhor_cupom(loja_id, preco):
-    melhor = None
-    menor = preco
+def buscar_cupons_na_pagina(soup: BeautifulSoup, loja_id: str, preco: float):
+    """
+    Tenta achar possíveis códigos de cupom no texto da página.
+    Não valida checkout. Apenas adiciona candidatos com confiança média/baixa.
+    """
+
+    texto = soup.get_text(" ", strip=True)
+    achados = []
+
+    padroes = [
+        r"cupom\s+([A-Z0-9]{4,20})",
+        r"código\s+([A-Z0-9]{4,20})",
+        r"codigo\s+([A-Z0-9]{4,20})",
+        r"use\s+([A-Z0-9]{4,20})",
+        r"aplique\s+([A-Z0-9]{4,20})",
+    ]
+
+    ignorar = {
+        "PARA",
+        "COMO",
+        "AQUI",
+        "SITE",
+        "APP",
+        "PIX",
+        "BOLETO",
+        "FRETE",
+        "GRATIS",
+        "DESCONTO",
+    }
+
+    for padrao in padroes:
+        for m in re.finditer(padrao, texto, flags=re.IGNORECASE):
+            codigo = m.group(1).upper().strip()
+
+            if codigo in ignorar:
+                continue
+
+            if len(codigo) < 4:
+                continue
+
+            achados.append({
+                "codigo": codigo,
+                "desc_pct": 0,
+                "desc_fixo": 0,
+                "tipo": "desconhecido",
+                "condicao": "Código encontrado no texto da página. Teste no checkout.",
+                "origem": "página da loja",
+                "confianca": "média",
+                "verificado": False,
+                "preco_final_estimado": round(float(preco), 2),
+                "economia": 0,
+                "aviso": "Cupom encontrado na página, mas não validado no checkout.",
+            })
+
+    # remove duplicados
+    unicos = {}
+    for c in achados:
+        unicos[c["codigo"]] = c
+
+    return list(unicos.values())
+
+
+def analisar_possiveis_cupons(loja_id: str, preco: float, soup: Optional[BeautifulSoup] = None):
+    """
+    Retorna cupons possíveis, sem aplicar automaticamente no preço final.
+    """
+
+    possiveis = []
 
     for c in CUPONS_BASE.get(loja_id, []):
-        final = calc_preco_final(preco, c)
+        estimado = calc_preco_final(preco, c)
 
-        if final < menor:
-            menor = final
-            melhor = c
+        possiveis.append({
+            **c,
+            "preco_final_estimado": estimado,
+            "economia": round(float(preco) - estimado, 2),
+            "aviso": "Cupom possível, não confirmado. Teste no checkout antes de considerar o desconto.",
+        })
 
-    return melhor
+    if soup:
+        possiveis.extend(buscar_cupons_na_pagina(soup, loja_id, preco))
+
+    # remove duplicados por código
+    unicos = {}
+    for c in possiveis:
+        codigo = c.get("codigo", "").upper()
+        if codigo and codigo not in unicos:
+            unicos[codigo] = c
+
+    return sorted(
+        list(unicos.values()),
+        key=lambda x: x.get("preco_final_estimado", preco)
+    )
 
 
-def enriquecer_resultado_com_cupom(resultado):
-    cupom = melhor_cupom(resultado["loja_id"], resultado["preco"])
-    preco_final = calc_preco_final(resultado["preco"], cupom) if cupom else resultado["preco"]
+def enriquecer_resultado(resultado, soup: Optional[BeautifulSoup] = None):
+    """
+    IMPORTANTE:
+    preco_final agora é o preço real encontrado.
+    Cupom não altera preco_final, pois não está validado.
+    """
 
-    resultado["melhor_cupom"] = cupom
-    resultado["preco_final"] = round(preco_final, 2)
+    preco = float(resultado["preco"])
+    loja_id = resultado["loja_id"]
+    possiveis_cupons = analisar_possiveis_cupons(loja_id, preco, soup)
+
+    resultado["preco_final"] = round(preco, 2)
+    resultado["possiveis_cupons"] = possiveis_cupons
+    resultado["melhor_cupom"] = possiveis_cupons[0] if possiveis_cupons else None
     resultado["cupom_confirmado"] = False
     resultado["observacao_cupom"] = (
-        "Preço com cupom é estimado. Confirme o cupom no checkout da loja."
-        if cupom
+        "Cupons listados são possíveis, não confirmados. Teste no checkout."
+        if possiveis_cupons
         else ""
     )
+    resultado["link_tipo"] = detectar_tipo_link(resultado.get("url", ""))
 
     return resultado
 
@@ -167,52 +420,150 @@ def calcular_preco_sugerido(meta, melhor_preco, menor_historico=None):
     return round(meta, 2)
 
 
+def extrair_json_ld_produtos(soup: BeautifulSoup, base_url: str, fallback_url: str):
+    produtos = []
+
+    for tag in soup.select('script[type="application/ld+json"]'):
+        raw = tag.string or tag.get_text()
+
+        if not raw:
+            continue
+
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+
+        pilha = data if isinstance(data, list) else [data]
+
+        while pilha:
+            item = pilha.pop()
+
+            if isinstance(item, list):
+                pilha.extend(item)
+                continue
+
+            if not isinstance(item, dict):
+                continue
+
+            tipo = item.get("@type")
+
+            if isinstance(tipo, list):
+                is_product = "Product" in tipo
+            else:
+                is_product = tipo == "Product"
+
+            if is_product:
+                nome = item.get("name") or item.get("description") or ""
+                url = item.get("url") or fallback_url
+
+                offers = item.get("offers") or {}
+                if isinstance(offers, list):
+                    offers = offers[0] if offers else {}
+
+                preco = (
+                    offers.get("price")
+                    or offers.get("lowPrice")
+                    or offers.get("highPrice")
+                    or item.get("price")
+                )
+
+                preco_limpo = limpar_preco(str(preco)) if preco else None
+
+                if preco_limpo:
+                    produtos.append({
+                        "titulo": nome,
+                        "preco": preco_limpo,
+                        "url": normalizar_url(base_url, url, fallback_url),
+                    })
+
+            for v in item.values():
+                if isinstance(v, (dict, list)):
+                    pilha.append(v)
+
+    return produtos
+
+
+def montar_resultado(loja_id, preco, titulo, url, condicao, soup=None):
+    return enriquecer_resultado({
+        "loja": LOJAS_NOMES.get(loja_id, loja_id),
+        "loja_id": loja_id,
+        "preco": round(float(preco), 2),
+        "titulo": titulo,
+        "url": url,
+        "condicao": condicao,
+    }, soup)
+
+
 # ── SCRAPERS ──────────────────────────────────────────────────────────────────
 
 def buscar_mercadolivre(nome):
     try:
         termo = quote_plus(nome).replace("+", "-")
         url = f"https://lista.mercadolivre.com.br/{termo}"
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "lxml")
+        html = get_html(url)
 
-        item = soup.select_one("li.ui-search-layout__item") or soup.select_one(".ui-search-result__wrapper")
-        if not item:
+        if not html:
             return None
 
-        preco_el = item.select_one(".andes-money-amount__fraction")
-        cents_el = item.select_one(".andes-money-amount__cents")
-        titulo_el = item.select_one(".ui-search-item__title, h2")
-        link_el = item.select_one("a[href*='/MLB-'], a.ui-search-link, a[href]")
+        soup = BeautifulSoup(html, "html.parser")
 
-        if not preco_el:
-            return None
+        cards = soup.select("li.ui-search-layout__item, .ui-search-result__wrapper")
 
-        val = preco_el.get_text(strip=True).replace(".", "")
-        if cents_el:
-            val += "." + cents_el.get_text(strip=True)
+        for item in cards[:8]:
+            preco_el = item.select_one(".andes-money-amount__fraction")
+            cents_el = item.select_one(".andes-money-amount__cents")
+            titulo_el = item.select_one(".ui-search-item__title, h2, a.poly-component__title")
+            link_el = item.select_one("a[href*='/MLB-'], a.ui-search-link, a[href*='produto.mercadolivre']")
 
-        return {
-            "loja": "Mercado Livre",
-            "loja_id": "mercadolivre",
-            "preco": float(val),
-            "titulo": titulo_el.get_text(strip=True) if titulo_el else nome,
-            "url": link_el["href"] if link_el and link_el.get("href") else url,
-            "condicao": "Novo",
-        }
+            if not preco_el:
+                continue
+
+            val = preco_el.get_text(strip=True).replace(".", "")
+
+            if cents_el:
+                val += "." + cents_el.get_text(strip=True)
+
+            preco = limpar_preco(val)
+
+            if not preco:
+                continue
+
+            titulo = titulo_el.get_text(strip=True) if titulo_el else nome
+
+            if not titulo_parece_relevante(titulo, nome):
+                continue
+
+            link = link_el.get("href") if link_el else url
+
+            return montar_resultado(
+                loja_id="mercadolivre",
+                preco=preco,
+                titulo=titulo,
+                url=link,
+                condicao="Novo",
+                soup=soup,
+            )
 
     except Exception as e:
         log.warning(f"[Mercado Livre] {e}")
-        return None
+
+    return None
 
 
 def buscar_amazon(nome):
     try:
         url = f"https://www.amazon.com.br/s?k={quote_plus(nome)}"
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "lxml")
+        html = get_html(url)
 
-        for res in soup.select('[data-component-type="s-search-result"]')[:8]:
+        if not html:
+            return None
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        cards = soup.select('[data-component-type="s-search-result"]')
+
+        for res in cards[:8]:
             preco_whole = res.select_one(".a-price-whole")
             preco_frac = res.select_one(".a-price-fraction")
             titulo_el = res.select_one("h2 a span")
@@ -222,20 +573,34 @@ def buscar_amazon(nome):
                 continue
 
             texto_preco = preco_whole.get_text(strip=True)
+
             if preco_frac:
                 texto_preco += "," + preco_frac.get_text(strip=True)
 
             preco = limpar_preco(texto_preco)
 
-            if preco and preco > 10:
-                return {
-                    "loja": "Amazon",
-                    "loja_id": "amazon",
-                    "preco": preco,
-                    "titulo": titulo_el.get_text(strip=True) if titulo_el else nome,
-                    "url": normalizar_url("https://www.amazon.com.br", link_el.get("href") if link_el else "", url),
-                    "condicao": "Novo",
-                }
+            if not preco or preco <= 10:
+                continue
+
+            titulo = titulo_el.get_text(strip=True) if titulo_el else nome
+
+            if not titulo_parece_relevante(titulo, nome):
+                continue
+
+            link = normalizar_url(
+                "https://www.amazon.com.br",
+                link_el.get("href") if link_el else "",
+                url
+            )
+
+            return montar_resultado(
+                loja_id="amazon",
+                preco=preco,
+                titulo=titulo,
+                url=link,
+                condicao="Novo",
+                soup=soup,
+            )
 
     except Exception as e:
         log.warning(f"[Amazon] {e}")
@@ -246,27 +611,75 @@ def buscar_amazon(nome):
 def buscar_kabum(nome):
     try:
         url = f"https://www.kabum.com.br/busca/{quote_plus(nome)}"
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "lxml")
+        html = get_html(url)
 
-        item = soup.select_one("article, .productCard, [data-testid='product-card']")
-        area = item or soup
+        if not html:
+            return None
 
-        preco_el = area.select_one(".finalPrice, [data-testid='price'], .priceCard")
-        titulo_el = area.select_one(".nameCard, [data-testid='product-name'], h2, h3")
-        link_el = area.select_one("a.productLink[href], a[href*='/produto/'], a[href]")
+        soup = BeautifulSoup(html, "html.parser")
 
-        if preco_el:
-            preco = limpar_preco(preco_el.get_text())
-            if preco and preco > 10:
-                return {
-                    "loja": "KaBuM!",
-                    "loja_id": "kabum",
-                    "preco": preco,
-                    "titulo": titulo_el.get_text(strip=True) if titulo_el else nome,
-                    "url": normalizar_url("https://www.kabum.com.br", link_el.get("href") if link_el else "", url),
-                    "condicao": "Novo",
-                }
+        json_produtos = extrair_json_ld_produtos(
+            soup,
+            "https://www.kabum.com.br",
+            url
+        )
+
+        for p in json_produtos:
+            if titulo_parece_relevante(p["titulo"], nome):
+                return montar_resultado(
+                    loja_id="kabum",
+                    preco=p["preco"],
+                    titulo=p["titulo"],
+                    url=p["url"],
+                    condicao="Novo",
+                    soup=soup,
+                )
+
+        cards = soup.select(
+            "article, .productCard, [data-testid='product-card'], "
+            "div[class*='product'], div[class*='Product']"
+        )
+
+        for card in cards[:12]:
+            texto_card = card.get_text(" ", strip=True)
+
+            if "R$" not in texto_card:
+                continue
+
+            preco_el = card.select_one(
+                ".finalPrice, [data-testid='price'], .priceCard, "
+                "span[class*='price'], div[class*='price']"
+            )
+            titulo_el = card.select_one(
+                ".nameCard, [data-testid='product-name'], h2, h3, "
+                "span[class*='name'], div[class*='name']"
+            )
+            link_el = card.select_one("a[href*='/produto/'], a.productLink[href], a[href]")
+
+            preco = limpar_preco(preco_el.get_text(" ", strip=True) if preco_el else texto_card)
+
+            if not preco or preco <= 10:
+                continue
+
+            titulo = titulo_el.get_text(" ", strip=True) if titulo_el else nome
+
+            if not titulo_parece_relevante(titulo, nome):
+                continue
+
+            link = normalizar_url(
+                "https://www.kabum.com.br",
+                link_el.get("href") if link_el else "",
+                url
+            )
+
+            return montar_resultado(
+                loja_id="kabum",
+                preco=preco,
+                titulo=titulo,
+                url=link,
+                condicao="Novo",
+                soup=soup,
+            )
 
     except Exception as e:
         log.warning(f"[KaBuM] {e}")
@@ -277,27 +690,75 @@ def buscar_kabum(nome):
 def buscar_magalu(nome):
     try:
         url = f"https://www.magazineluiza.com.br/busca/{quote_plus(nome)}/"
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "lxml")
+        html = get_html(url)
 
-        item = soup.select_one("[data-testid='product-card'], li, article")
-        area = item or soup
+        if not html:
+            return None
 
-        preco_el = area.select_one('[data-testid="price-value"], .sc-kpDqfB, p[data-testid*="price"]')
-        titulo_el = area.select_one("h2, h3, [data-testid='product-title']")
-        link_el = area.select_one("a[href*='/p/'], a[href]")
+        soup = BeautifulSoup(html, "html.parser")
 
-        if preco_el:
-            preco = limpar_preco(preco_el.get_text())
-            if preco and preco > 10:
-                return {
-                    "loja": "Magalu",
-                    "loja_id": "magalu",
-                    "preco": preco,
-                    "titulo": titulo_el.get_text(strip=True) if titulo_el else nome,
-                    "url": normalizar_url("https://www.magazineluiza.com.br", link_el.get("href") if link_el else "", url),
-                    "condicao": "Novo",
-                }
+        json_produtos = extrair_json_ld_produtos(
+            soup,
+            "https://www.magazineluiza.com.br",
+            url
+        )
+
+        for p in json_produtos:
+            if titulo_parece_relevante(p["titulo"], nome):
+                return montar_resultado(
+                    loja_id="magalu",
+                    preco=p["preco"],
+                    titulo=p["titulo"],
+                    url=p["url"],
+                    condicao="Novo",
+                    soup=soup,
+                )
+
+        cards = soup.select(
+            "[data-testid='product-card'], li, article, "
+            "div[class*='product'], div[class*='Product']"
+        )
+
+        for card in cards[:12]:
+            texto_card = card.get_text(" ", strip=True)
+
+            if "R$" not in texto_card:
+                continue
+
+            preco_el = card.select_one(
+                '[data-testid="price-value"], p[data-testid*="price"], '
+                "span[class*='price'], div[class*='price']"
+            )
+            titulo_el = card.select_one(
+                "h2, h3, [data-testid='product-title'], "
+                "span[class*='title'], div[class*='title']"
+            )
+            link_el = card.select_one("a[href*='/p/'], a[href]")
+
+            preco = limpar_preco(preco_el.get_text(" ", strip=True) if preco_el else texto_card)
+
+            if not preco or preco <= 10:
+                continue
+
+            titulo = titulo_el.get_text(" ", strip=True) if titulo_el else nome
+
+            if not titulo_parece_relevante(titulo, nome):
+                continue
+
+            link = normalizar_url(
+                "https://www.magazineluiza.com.br",
+                link_el.get("href") if link_el else "",
+                url
+            )
+
+            return montar_resultado(
+                loja_id="magalu",
+                preco=preco,
+                titulo=titulo,
+                url=link,
+                condicao="Novo",
+                soup=soup,
+            )
 
     except Exception as e:
         log.warning(f"[Magalu] {e}")
@@ -308,27 +769,51 @@ def buscar_magalu(nome):
 def buscar_olx(nome):
     try:
         url = f"https://www.olx.com.br/brasil?q={quote_plus(nome)}"
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "lxml")
+        html = get_html(url)
 
-        item = soup.select_one("section[data-ds-component='DS-AdCard'], li, article")
-        area = item or soup
+        if not html:
+            return None
 
-        preco_el = area.select_one('[data-lurker-detail="price"], [aria-label*="Preço"], span')
-        titulo_el = area.select_one("h2, h3")
-        link_el = area.select_one("a[href*='olx.com.br'], a[href]")
+        soup = BeautifulSoup(html, "html.parser")
 
-        preco = limpar_preco(preco_el.get_text()) if preco_el else None
+        cards = soup.select(
+            "section[data-ds-component='DS-AdCard'], "
+            "[data-testid='ad-card'], li, article"
+        )
 
-        if preco and preco > 10:
-            return {
-                "loja": "OLX",
-                "loja_id": "olx",
-                "preco": preco,
-                "titulo": titulo_el.get_text(strip=True) if titulo_el else nome,
-                "url": link_el.get("href") if link_el and link_el.get("href") else url,
-                "condicao": "Usado",
-            }
+        for card in cards[:12]:
+            texto_card = card.get_text(" ", strip=True)
+
+            if "R$" not in texto_card:
+                continue
+
+            preco_el = card.select_one(
+                '[data-lurker-detail="price"], [aria-label*="Preço"], '
+                "span[class*='price'], div[class*='price']"
+            )
+            titulo_el = card.select_one("h2, h3, [aria-label*='Título']")
+            link_el = card.select_one("a[href*='olx.com.br'], a[href]")
+
+            preco = limpar_preco(preco_el.get_text(" ", strip=True) if preco_el else texto_card)
+
+            if not preco or preco <= 10:
+                continue
+
+            titulo = titulo_el.get_text(" ", strip=True) if titulo_el else nome
+
+            if not titulo_parece_relevante(titulo, nome):
+                continue
+
+            link = link_el.get("href") if link_el and link_el.get("href") else url
+
+            return montar_resultado(
+                loja_id="olx",
+                preco=preco,
+                titulo=titulo,
+                url=link,
+                condicao="Usado",
+                soup=soup,
+            )
 
     except Exception as e:
         log.warning(f"[OLX] {e}")
@@ -339,27 +824,49 @@ def buscar_olx(nome):
 def buscar_enjoei(nome):
     try:
         url = f"https://www.enjoei.com.br/busca?q={quote_plus(nome)}"
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(r.text, "lxml")
+        html = get_html(url)
 
-        item = soup.select_one("a[href*='/p/'], .product-card, article")
-        area = item or soup
+        if not html:
+            return None
 
-        preco_el = area.select_one(".price, [data-testid*='price'], span")
-        titulo_el = area.select_one(".product-title, h2, h3")
-        link_el = area if getattr(area, "name", None) == "a" else area.select_one("a[href]")
+        soup = BeautifulSoup(html, "html.parser")
 
-        preco = limpar_preco(preco_el.get_text()) if preco_el else None
+        cards = soup.select("a[href*='/p/'], .product-card, article, li")
 
-        if preco and preco > 10:
-            return {
-                "loja": "Enjoei",
-                "loja_id": "enjoei",
-                "preco": preco,
-                "titulo": titulo_el.get_text(strip=True) if titulo_el else nome,
-                "url": normalizar_url("https://www.enjoei.com.br", link_el.get("href") if link_el else "", url),
-                "condicao": "Seminovo",
-            }
+        for card in cards[:12]:
+            texto_card = card.get_text(" ", strip=True)
+
+            if "R$" not in texto_card:
+                continue
+
+            preco_el = card.select_one(".price, [data-testid*='price'], span[class*='price']")
+            titulo_el = card.select_one(".product-title, h2, h3, [class*='title']")
+            link_el = card if getattr(card, "name", None) == "a" else card.select_one("a[href]")
+
+            preco = limpar_preco(preco_el.get_text(" ", strip=True) if preco_el else texto_card)
+
+            if not preco or preco <= 10:
+                continue
+
+            titulo = titulo_el.get_text(" ", strip=True) if titulo_el else nome
+
+            if not titulo_parece_relevante(titulo, nome):
+                continue
+
+            link = normalizar_url(
+                "https://www.enjoei.com.br",
+                link_el.get("href") if link_el else "",
+                url
+            )
+
+            return montar_resultado(
+                loja_id="enjoei",
+                preco=preco,
+                titulo=titulo,
+                url=link,
+                condicao="Seminovo",
+                soup=soup,
+            )
 
     except Exception as e:
         log.warning(f"[Enjoei] {e}")
@@ -370,17 +877,24 @@ def buscar_enjoei(nome):
 def buscar_em_todos(nome):
     resultados = []
 
-    for fn in [
+    funcoes = [
         buscar_mercadolivre,
         buscar_amazon,
         buscar_kabum,
         buscar_magalu,
         buscar_olx,
         buscar_enjoei,
-    ]:
-        res = fn(nome)
-        if res:
-            resultados.append(enriquecer_resultado_com_cupom(res))
+    ]
+
+    for fn in funcoes:
+        try:
+            res = fn(nome)
+
+            if res:
+                resultados.append(res)
+
+        except Exception as e:
+            log.warning(f"Erro em {fn.__name__}: {e}")
 
     return sorted(resultados, key=lambda x: x.get("preco_final", x["preco"]))
 
@@ -431,24 +945,27 @@ def montar_email_alerta(produto, resultados, tipo_alerta="META_ATINGIDA", pct=No
     lojas_rows = ""
 
     for r in resultados:
-        mc = r.get("melhor_cupom")
         preco_final = r.get("preco_final", r["preco"])
         cor = "#2e7d32" if preco_final <= meta else "#e65100" if preco_final <= meta * 1.10 else "#333"
+        cupons = r.get("possiveis_cupons", [])
+        cupom_html = "—"
 
-        cupom_html = (
-            f"<code>{mc['codigo']}</code><br><small>estimado; confirme no checkout</small>"
-            if mc
-            else "—"
-        )
+        if cupons:
+            primeiros = cupons[:2]
+            cupom_html = "<br>".join(
+                f"<code>{c['codigo']}</code> <small>possível, não verificado</small>"
+                for c in primeiros
+            )
+
+        link_label = "Produto" if r.get("link_tipo") == "produto" else "Busca"
 
         lojas_rows += f"""
         <tr>
           <td style="padding:8px 12px;border-bottom:1px solid #eee;">{r['loja']}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #eee;font-weight:700;color:{cor};">R$ {r['preco']:.2f}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-weight:700;color:{cor};">R$ {preco_final:.2f}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #eee;">{r.get('condicao','')}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #eee;">{cupom_html}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #eee;"><a href="{r['url']}">Ver produto →</a></td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;"><a href="{r['url']}">{link_label} →</a></td>
         </tr>"""
 
     pct_bloco = f"<p>Distância da meta: <b>{pct:.1f}% acima</b></p>" if pct is not None else ""
@@ -475,10 +992,9 @@ def montar_email_alerta(produto, resultados, tipo_alerta="META_ATINGIDA", pct=No
           <table style="width:100%;border-collapse:collapse;font-size:13px;">
             <tr style="background:#f5f5f5;">
               <th style="padding:8px 12px;text-align:left;">Loja</th>
-              <th style="padding:8px 12px;text-align:left;">Preço</th>
-              <th style="padding:8px 12px;text-align:left;">Preço c/ cupom estimado</th>
+              <th style="padding:8px 12px;text-align:left;">Preço real</th>
               <th style="padding:8px 12px;text-align:left;">Condição</th>
-              <th style="padding:8px 12px;text-align:left;">Cupom</th>
+              <th style="padding:8px 12px;text-align:left;">Possíveis cupons</th>
               <th style="padding:8px 12px;text-align:left;">Link</th>
             </tr>
             {lojas_rows}
@@ -490,7 +1006,7 @@ def montar_email_alerta(produto, resultados, tipo_alerta="META_ATINGIDA", pct=No
           </a>
 
           <p style="font-size:12px;color:#777;margin-top:18px;">
-            Os preços e cupons podem mudar a qualquer momento. Cupons são estimativas e precisam ser confirmados no checkout da loja.
+            Os preços podem mudar a qualquer momento. Cupons listados são possíveis e precisam ser testados no checkout.
           </p>
         </div>
       </body>
