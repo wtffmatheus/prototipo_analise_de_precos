@@ -26,6 +26,15 @@ const T = {
   dim: "#4a5568",
 };
 
+const lojaInfo = {
+  mercadolivre: { nome: "Mercado Livre", cor: "#ffe600", bg: "#ffe60015", emoji: "🛒" },
+  amazon: { nome: "Amazon", cor: "#ff9900", bg: "#ff990015", emoji: "📦" },
+  kabum: { nome: "KaBuM!", cor: "#f04e23", bg: "#f04e2315", emoji: "🖥️" },
+  magalu: { nome: "Magalu", cor: "#0086ff", bg: "#0086ff15", emoji: "🛍️" },
+  olx: { nome: "OLX", cor: "#9adc00", bg: "#9adc0015", emoji: "🏷️" },
+  enjoei: { nome: "Enjoei", cor: "#ff69b4", bg: "#ff69b415", emoji: "✨" },
+};
+
 function formatarMoeda(valor) {
   return Number(valor || 0).toLocaleString("pt-BR", {
     style: "currency",
@@ -33,57 +42,139 @@ function formatarMoeda(valor) {
   });
 }
 
-// Histórico ESTIMADO para visualização — deixa claro que é simulado
-function gerarHistoricoEstimado(base, dias = 21) {
-  let preco = Number(base || 1000) * 1.1;
-  const hoje = new Date();
-  return Array.from({ length: dias }, (_, i) => {
-    preco *= 1 + (Math.random() * 0.07 - 0.035);
-    const data = new Date(hoje);
-    data.setDate(data.getDate() - (dias - 1 - i));
-    return {
-      data: data.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" }),
-      preco: Number(preco.toFixed(2)),
-    };
-  });
+function detectarTipoLink(url = "") {
+  const u = String(url).toLowerCase();
+
+  if (!u) return "sem_link";
+
+  const pareceBusca =
+    u.includes("/busca") ||
+    u.includes("search") ||
+    u.includes("?q=") ||
+    u.includes("/s?k=") ||
+    u.includes("lista.mercadolivre") ||
+    u.includes("olx.com.br/brasil") ||
+    u.includes("enjoei.com.br/busca");
+
+  return pareceBusca ? "busca" : "produto";
 }
 
-const lojaInfo = {
-  mercadolivre: { nome: "Mercado Livre", cor: "#ffe600", bg: "#ffe60015", emoji: "🛒" },
-  amazon:       { nome: "Amazon",        cor: "#ff9900", bg: "#ff990015", emoji: "📦" },
-  kabum:        { nome: "KaBuM!",        cor: "#f04e23", bg: "#f04e2315", emoji: "🖥️" },
-  magalu:       { nome: "Magalu",        cor: "#0086ff", bg: "#0086ff15", emoji: "🛍️" },
-  olx:          { nome: "OLX",           cor: "#9adc00", bg: "#9adc0015", emoji: "🏷️" },
-  enjoei:       { nome: "Enjoei",        cor: "#ff69b4", bg: "#ff69b415", emoji: "✨" },
-};
+function normalizarCupom(cupom, precoReal) {
+  if (!cupom) return null;
 
-const Chip = ({ children, color = T.cyan, bg, style = {} }) => (
-  <span style={{
-    background: bg || `${color}20`,
-    color,
-    fontSize: 11,
-    fontWeight: 800,
-    padding: "4px 9px",
-    borderRadius: 999,
-    border: `1px solid ${color}35`,
-    whiteSpace: "nowrap",
-    ...style,
-  }}>
-    {children}
-  </span>
-);
+  return {
+    codigo: cupom.codigo || cupom.code || "CUPOM",
+    condicao: cupom.condicao || cupom.descricao || "Possível cupom. Teste no checkout.",
+    origem: cupom.origem || "Não informado",
+    confianca: cupom.confianca || "baixa",
+    verificado: Boolean(cupom.verificado || cupom.confirmado),
+    preco_final_estimado: Number(cupom.preco_final_estimado || precoReal),
+    aviso:
+      cupom.aviso ||
+      "Cupom possível, não confirmado. Não foi aplicado ao preço exibido.",
+  };
+}
+
+function normalizarHistorico(historico) {
+  if (!Array.isArray(historico)) return [];
+
+  return historico
+    .map((h) => ({
+      data: h.data || h.criado_em || h.created_at || "",
+      preco: Number(h.preco || h.preco_final || h.valor || 0),
+    }))
+    .filter((h) => h.preco > 0);
+}
+
+function normalizarResultadosBackend(resultados) {
+  return (resultados || [])
+    .map((r) => {
+      // REGRA PRINCIPAL:
+      // O preço exibido é o preço REAL vindo do backend.
+      // Não usamos cupom para alterar preço no frontend.
+      const precoReal = Number(r.preco ?? r.preco_real ?? r.valor ?? r.preco_final ?? 0);
+
+      const possiveisCuponsRaw =
+        r.possiveis_cupons ||
+        r.cupons_possiveis ||
+        r.cupons ||
+        [];
+
+      const possiveisCupons = Array.isArray(possiveisCuponsRaw)
+        ? possiveisCuponsRaw
+            .map((c) => normalizarCupom(c, precoReal))
+            .filter(Boolean)
+        : [];
+
+      const melhorCupom = r.melhor_cupom
+        ? normalizarCupom(r.melhor_cupom, precoReal)
+        : possiveisCupons[0] || null;
+
+      const url = r.url || "";
+      const linkTipo = r.link_tipo || detectarTipoLink(url);
+
+      return {
+        loja_id: r.loja_id || r.id_loja || "loja",
+        loja: r.loja || lojaInfo[r.loja_id]?.nome || r.loja_id || "Loja",
+        precoReal,
+        titulo: r.titulo || r.nome || "Produto encontrado",
+        condicao: r.condicao || "Não informado",
+        url,
+        link_tipo: linkTipo,
+        melhor_cupom: melhorCupom,
+        possiveis_cupons: possiveisCupons,
+        cupom_confirmado: Boolean(r.cupom_confirmado),
+        historico: normalizarHistorico(r.historico || r.historico_real),
+      };
+    })
+    .filter((r) => r.precoReal > 0)
+    .sort((a, b) => a.precoReal - b.precoReal);
+}
+
+function Chip({ children, color = T.cyan, bg, style = {} }) {
+  return (
+    <span
+      style={{
+        background: bg || `${color}20`,
+        color,
+        fontSize: 11,
+        fontWeight: 800,
+        padding: "4px 9px",
+        borderRadius: 999,
+        border: `1px solid ${color}35`,
+        whiteSpace: "nowrap",
+        ...style,
+      }}
+    >
+      {children}
+    </span>
+  );
+}
 
 function LojaTag({ id, nome }) {
-  const loja = lojaInfo[id] || { nome: nome || id, cor: T.cyan, bg: T.cyanDim, emoji: "🏬" };
-  return <Chip color={loja.cor} bg={loja.bg}>{loja.emoji} {loja.nome}</Chip>;
+  const loja = lojaInfo[id] || {
+    nome: nome || id || "Loja",
+    cor: T.cyan,
+    bg: T.cyanDim,
+    emoji: "🏬",
+  };
+
+  return (
+    <Chip color={loja.cor} bg={loja.bg}>
+      {loja.emoji} {loja.nome}
+    </Chip>
+  );
 }
 
 function TooltipChart({ active, payload, label }) {
   if (!active || !payload?.length) return null;
+
   return (
-    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, padding: "9px 12px", fontSize: 12 }}>
+    <div className="tooltip-chart">
       <div style={{ color: T.muted }}>{label}</div>
-      <div style={{ color: T.cyan, fontWeight: 800 }}>{formatarMoeda(payload[0].value)}</div>
+      <div style={{ color: T.cyan, fontWeight: 800 }}>
+        {formatarMoeda(payload[0].value)}
+      </div>
     </div>
   );
 }
@@ -97,83 +188,125 @@ function TelaBusca({ onBuscar, carregando, erro }) {
   const [aceitaNovo, setAceitaNovo] = useState(true);
   const inputRef = useRef(null);
 
-  useEffect(() => { inputRef.current?.focus(); }, []);
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
 
   const podeBuscar = nome.trim() && meta && Number(meta) > 0 && !carregando;
 
-  const inputStyle = {
-    width: "100%", boxSizing: "border-box",
-    background: T.bg, border: `1.5px solid ${T.border}`, borderRadius: 13,
-    padding: "14px 15px", color: T.text, fontSize: 15, outline: "none", marginBottom: 15,
-  };
-  const labelStyle = {
-    fontSize: 11, fontWeight: 900, color: T.muted,
-    textTransform: "uppercase", letterSpacing: 1, display: "block", marginBottom: 7,
-  };
-
   function enviarBusca() {
     if (!podeBuscar) return;
-    onBuscar({ nome: nome.trim(), meta: Number(meta), email: email.trim(), proximidade: Number(proximidade || 10), aceitaUsado, aceitaNovo });
+
+    onBuscar({
+      nome: nome.trim(),
+      meta: Number(meta),
+      email: email.trim(),
+      proximidade: Number(proximidade || 10),
+      aceitaUsado,
+      aceitaNovo,
+    });
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: T.bg, color: T.text, display: "flex", alignItems: "center", justifyContent: "center", padding: 18, fontFamily: "'Inter', 'Segoe UI', Arial, sans-serif" }}>
-      <div style={{ width: "100%", maxWidth: 520 }}>
-        <div style={{ textAlign: "center", marginBottom: 28 }}>
-          <div style={{ fontSize: 48, marginBottom: 8 }}>🎯</div>
-          <h1 style={{ margin: 0, fontSize: "clamp(30px, 8vw, 46px)", fontWeight: 950, letterSpacing: -1.5 }}>
-            Monitor de <span style={{ color: T.cyan }}>Preços</span>
+    <main className="page-center">
+      <section className="search-shell">
+        <div className="hero">
+          <div className="hero-icon">🎯</div>
+          <h1>
+            Monitor de <span>Preços</span>
           </h1>
-          <p style={{ color: T.muted, marginTop: 10, fontSize: 14 }}>
+          <p>
             Monitore produtos novos e usados, receba alerta por email e compare lojas.
           </p>
         </div>
 
-        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 24, padding: "clamp(18px, 5vw, 28px)", boxShadow: `0 0 90px ${T.cyan}12` }}>
-          <label style={labelStyle}>Produto</label>
-          <input ref={inputRef} value={nome} onChange={e => setNome(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && enviarBusca()}
-            placeholder="Ex: Ryzen 7 5700X, iPhone 15, RTX 4070..." style={inputStyle} />
+        <div className="search-card">
+          <div className="form-grid">
+            <div className="form-field full">
+              <label>Produto</label>
+              <input
+                ref={inputRef}
+                value={nome}
+                onChange={(e) => setNome(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && enviarBusca()}
+                placeholder="Ex: Ryzen 7 5700X, iPhone 15, RTX 4070..."
+              />
+            </div>
 
-          <label style={labelStyle}>Preço meta</label>
-          <input value={meta} onChange={e => setMeta(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && enviarBusca()}
-            placeholder="Ex: 950" type="number" style={inputStyle} />
+            <div className="form-field">
+              <label>Preço meta</label>
+              <input
+                value={meta}
+                onChange={(e) => setMeta(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && enviarBusca()}
+                placeholder="Ex: 950"
+                type="number"
+              />
+            </div>
 
-          <label style={labelStyle}>Email para alerta</label>
-          <input value={email} onChange={e => setEmail(e.target.value)}
-            placeholder="seuemail@gmail.com" type="email" style={inputStyle} />
+            <div className="form-field">
+              <label>Proximidade</label>
+              <input
+                value={proximidade}
+                onChange={(e) => setProximidade(e.target.value)}
+                type="number"
+                min="1"
+                max="100"
+              />
+            </div>
 
-          <label style={labelStyle}>Alertar quando estiver até X% acima da meta</label>
-          <input value={proximidade} onChange={e => setProximidade(e.target.value)}
-            type="number" min="1" max="100" style={inputStyle} />
+            <div className="form-field full">
+              <label>Email para alerta</label>
+              <input
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="seuemail@gmail.com"
+                type="email"
+              />
+            </div>
+          </div>
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
-            <label style={{ color: T.text, fontSize: 14 }}>
-              <input type="checkbox" checked={aceitaNovo} onChange={e => setAceitaNovo(e.target.checked)} /> Aceitar novo
+          <div className="check-row">
+            <label className="check-label">
+              <input
+                type="checkbox"
+                checked={aceitaNovo}
+                onChange={(e) => setAceitaNovo(e.target.checked)}
+              />
+              Aceitar novo
             </label>
-            <label style={{ color: T.text, fontSize: 14 }}>
-              <input type="checkbox" checked={aceitaUsado} onChange={e => setAceitaUsado(e.target.checked)} /> Aceitar usado/seminovo
+
+            <label className="check-label">
+              <input
+                type="checkbox"
+                checked={aceitaUsado}
+                onChange={(e) => setAceitaUsado(e.target.checked)}
+              />
+              Aceitar usado/seminovo
             </label>
           </div>
 
-          <button onClick={enviarBusca} disabled={!podeBuscar} style={{
-            width: "100%", padding: "15px 0",
-            background: podeBuscar ? `linear-gradient(135deg, ${T.cyan}, #007ea8)` : T.border,
-            color: podeBuscar ? "#000" : T.dim,
-            border: "none", borderRadius: 13, fontSize: 15, fontWeight: 950,
-            cursor: podeBuscar ? "pointer" : "not-allowed",
-          }}>
+          <button className="primary-button" disabled={!podeBuscar} onClick={enviarBusca}>
             {carregando ? "🔍 Buscando nas lojas..." : "🔍 Buscar e monitorar"}
           </button>
 
-          {erro && <div style={{ color: T.red, marginTop: 13, fontSize: 13, textAlign: "center" }}>{erro}</div>}
+          {erro && <div className="erro">{erro}</div>}
 
-          <p style={{ color: T.muted, fontSize: 12, lineHeight: 1.5, marginTop: 16 }}>
-            Observação: cupons aparecem como estimativa. Confirme a validade no checkout da loja.
+          <p className="hint">
+            O sistema não inventa preço. Se nenhuma loja retornar produto real, você verá
+            a mensagem de nenhum resultado encontrado.
           </p>
         </div>
-      </div>
+      </section>
+    </main>
+  );
+}
+
+function Resumo({ label, value, color = T.text }) {
+  return (
+    <div className="summary-card">
+      <span>{label}</span>
+      <strong style={{ color }}>{value}</strong>
     </div>
   );
 }
@@ -183,215 +316,290 @@ function PainelResultado({ dados, meta, onNovaBusca }) {
   const [aba, setAba] = useState("precos");
 
   const resultados = useMemo(() => {
-    return (dados.resultados || [])
-      .map(r => ({
-        ...r,
-        // precoFinal vem direto do backend — nunca calculado no front
-        precoFinal: Number(r.preco_final ?? r.preco),
-        historicoEstimado: gerarHistoricoEstimado(Number(r.preco_final ?? r.preco)),
-      }))
-      .sort((a, b) => a.precoFinal - b.precoFinal);
+    return normalizarResultadosBackend(dados.resultados);
   }, [dados]);
 
   useEffect(() => {
-    if (!lojaAtiva && resultados[0]) setLojaAtiva(resultados[0].loja_id);
+    if (!lojaAtiva && resultados[0]) {
+      setLojaAtiva(resultados[0].loja_id);
+    }
   }, [resultados, lojaAtiva]);
 
-  const ativo = resultados.find(r => r.loja_id === lojaAtiva) || resultados[0];
+  const ativo = resultados.find((r) => r.loja_id === lojaAtiva) || resultados[0];
   const lojaConf = lojaInfo[ativo?.loja_id] || { cor: T.cyan };
   const melhor = resultados[0];
 
-  const labelLink = r => r.link_tipo === "busca" ? "Ver busca →" : "Ver produto →";
+  const cupons = resultados.flatMap((r) =>
+    (r.possiveis_cupons || []).map((cupom) => ({
+      ...cupom,
+      loja_id: r.loja_id,
+      loja: r.loja,
+      url: r.url,
+      precoReal: r.precoReal,
+    }))
+  );
 
   return (
-    <div style={{ minHeight: "100vh", background: T.bg, color: T.text, padding: "clamp(12px, 3vw, 24px)", fontFamily: "'Inter', 'Segoe UI', Arial, sans-serif" }}>
-      <div style={{ maxWidth: 1240, margin: "0 auto" }}>
-
-        <header style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "flex-start", marginBottom: 18, flexWrap: "wrap" }}>
+    <main className="dashboard-page">
+      <div className="dashboard-container">
+        <header className="dashboard-header">
           <div>
-            <div style={{ fontSize: 11, color: T.muted, textTransform: "uppercase", letterSpacing: 1, fontWeight: 900 }}>🎯 Monitorando</div>
-            <h1 style={{ margin: "4px 0", fontSize: "clamp(22px, 5vw, 36px)", letterSpacing: -1 }}>{dados.produto_normalizado}</h1>
-            <div style={{ color: T.muted, fontSize: 14 }}>
-              Meta: <b style={{ color: T.cyan }}>{formatarMoeda(meta)}</b>
-              {dados.email && <span style={{ marginLeft: 8 }}>· alerta em <b>{dados.email}</b></span>}
-            </div>
+            <div className="eyebrow">🎯 Monitorando</div>
+            <h1>{dados.produto_normalizado || dados.nome || "Produto"}</h1>
+            <p>
+              Meta: <b>{formatarMoeda(meta)}</b>
+              {dados.email && (
+                <>
+                  {" "}
+                  · alerta em <b>{dados.email}</b>
+                </>
+              )}
+            </p>
           </div>
-          <button onClick={onNovaBusca} style={{ background: T.cardAlt, color: T.text, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 14px", fontWeight: 900, cursor: "pointer" }}>
+
+          <button className="new-search" onClick={onNovaBusca}>
             + Nova busca
           </button>
         </header>
 
-        {/* Sem resultados: mensagem limpa, sem banner de simulação */}
         {resultados.length === 0 ? (
-          <section style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 18, padding: 24 }}>
-            <h2 style={{ marginTop: 0 }}>Nenhum preço encontrado agora</h2>
-            <p style={{ color: T.muted, lineHeight: 1.7 }}>{dados.analise}</p>
-            <p style={{ color: T.muted, fontSize: 13 }}>
-              O produto foi salvo e será verificado automaticamente. Você receberá um email quando o preço atingir sua meta.
+          <section className="empty-card">
+            <h2>Nenhum preço real encontrado agora</h2>
+            <p>
+              O backend não retornou produtos reais para essa busca. Nenhum preço foi
+              inventado pelo frontend.
             </p>
+            <p>
+              O produto pode ter sido salvo para monitoramento. Quando o backend encontrar
+              uma oferta real que atinja a meta ou fique próxima dela, o alerta por email
+              poderá ser enviado.
+            </p>
+            {dados.analise && <p>{dados.analise}</p>}
+            <button className="new-search" onClick={onNovaBusca}>
+              Fazer nova busca
+            </button>
           </section>
         ) : (
           <>
-            {/* Cards de resumo */}
-            <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 16 }}>
-              <Resumo label="Melhor preço" value={formatarMoeda(melhor?.precoFinal)} color={T.green} />
+            <section className="summary-grid">
+              <Resumo
+                label="Melhor preço real"
+                value={formatarMoeda(melhor?.precoReal)}
+                color={T.green}
+              />
               <Resumo label="Loja destaque" value={melhor?.loja || "-"} />
               <Resumo label="Condição" value={melhor?.condicao || "-"} />
-              <Resumo label="Status"
-                value={melhor?.precoFinal <= meta ? "Dentro da meta" : "Monitorando"}
-                color={melhor?.precoFinal <= meta ? T.green : T.orange}
+              <Resumo
+                label="Status"
+                value={melhor?.precoReal <= meta ? "Dentro da meta" : "Monitorando"}
+                color={melhor?.precoReal <= meta ? T.green : T.orange}
               />
             </section>
 
-            {/* Abas */}
-            <div style={{ display: "flex", gap: 6, background: T.card, border: `1px solid ${T.border}`, borderRadius: 14, padding: 5, marginBottom: 16 }}>
-              {[{ id: "precos", label: "💰 Preços" }, { id: "cupons", label: "🎟️ Cupons estimados" }].map(item => (
-                <button key={item.id} onClick={() => setAba(item.id)} style={{
-                  flex: 1, padding: "10px 0", borderRadius: 11, border: "none",
-                  background: aba === item.id ? T.cardAlt : "transparent",
-                  color: aba === item.id ? T.text : T.muted,
-                  fontWeight: 900, cursor: "pointer",
-                }}>
-                  {item.label}
-                </button>
-              ))}
+            <div className="tabs">
+              <button
+                className={aba === "precos" ? "active" : ""}
+                onClick={() => setAba("precos")}
+              >
+                💰 Preços reais
+              </button>
+              <button
+                className={aba === "cupons" ? "active" : ""}
+                onClick={() => setAba("cupons")}
+              >
+                🎟️ Possíveis cupons
+              </button>
             </div>
 
             {aba === "precos" && (
-              <div style={{ display: "grid", gap: 14 }}>
-                <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(270px, 1fr))", gap: 12 }}>
+              <div className="result-layout">
+                <section className="cards-grid">
                   {resultados.map((r, index) => {
-                    const loja = lojaInfo[r.loja_id] || { cor: T.cyan, bg: T.cyanDim };
-                    const atingiu = r.precoFinal <= meta;
+                    const loja = lojaInfo[r.loja_id] || {
+                      cor: T.cyan,
+                      bg: T.cyanDim,
+                    };
+
+                    const atingiu = r.precoReal <= meta;
                     const selecionada = lojaAtiva === r.loja_id;
                     const eBusca = r.link_tipo === "busca";
 
                     return (
-                      <div key={`${r.loja_id}-${index}`} onClick={() => setLojaAtiva(r.loja_id)} style={{
-                        background: selecionada ? T.cardAlt : T.card,
-                        border: `1.5px solid ${selecionada ? `${loja.cor}70` : T.border}`,
-                        borderRadius: 18, padding: 16, cursor: "pointer",
-                        boxShadow: selecionada ? `0 0 24px ${loja.cor}16` : "none",
-                      }}>
-                        <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 9 }}>
+                      <article
+                        key={`${r.loja_id}-${index}`}
+                        className={`price-card ${selecionada ? "selected" : ""}`}
+                        onClick={() => setLojaAtiva(r.loja_id)}
+                        style={{
+                          borderColor: selecionada ? `${loja.cor}80` : undefined,
+                          boxShadow: selecionada ? `0 0 24px ${loja.cor}16` : undefined,
+                        }}
+                      >
+                        <div className="card-chips">
                           <LojaTag id={r.loja_id} nome={r.loja} />
                           {index === 0 && <Chip color={T.green}>🏆 Melhor</Chip>}
                           {atingiu && <Chip color={T.green}>✅ Meta</Chip>}
-                          {eBusca && <Chip color={T.orange}>🔍 Busca</Chip>}
+                          {eBusca ? (
+                            <Chip color={T.orange}>🔍 Busca da loja</Chip>
+                          ) : (
+                            <Chip color={T.green}>🔗 Produto direto</Chip>
+                          )}
                         </div>
 
-                        {/* Preço real — único valor exibido, sem "Preço base" */}
-                        <div style={{ color: atingiu ? T.green : T.text, fontSize: "clamp(24px, 6vw, 34px)", fontWeight: 950, marginBottom: 6 }}>
-                          {formatarMoeda(r.precoFinal)}
-                        </div>
+                        <div className="price-value">{formatarMoeda(r.precoReal)}</div>
 
-                        <div style={{ color: T.muted, fontSize: 13, marginBottom: 8 }}>
+                        <div className="product-title">
                           {r.condicao} · {r.titulo || "Produto encontrado"}
                         </div>
 
                         {r.melhor_cupom && (
-                          <div style={{ marginBottom: 8 }}>
-                            <div style={{ color: T.orange, fontSize: 13 }}>
-                              🎟️ Cupom estimado: <b>{r.melhor_cupom.codigo}</b>
-                            </div>
-                            <div style={{ color: T.muted, fontSize: 12, marginTop: 2 }}>
-                              Não aplicado no preço — teste no checkout.
-                            </div>
+                          <div className="coupon-line">
+                            🎟️ Possível cupom: <b>{r.melhor_cupom.codigo}</b>
                           </div>
                         )}
 
-                        <a href={r.url} target="_blank" rel="noreferrer"
-                          onClick={e => e.stopPropagation()}
-                          style={{ display: "inline-block", color: "#000", background: loja.cor || T.cyan, padding: "9px 12px", borderRadius: 10, textDecoration: "none", fontWeight: 900 }}>
-                          {labelLink(r)}
-                        </a>
-                      </div>
+                        {r.melhor_cupom && (
+                          <div className="coupon-warning">
+                            Cupom não confirmado. Não foi aplicado ao preço.
+                          </div>
+                        )}
+
+                        {r.url ? (
+                          <a
+                            href={r.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="open-link"
+                            style={{ background: loja.cor || T.cyan }}
+                          >
+                            {eBusca ? "Abrir busca →" : "Abrir produto →"}
+                          </a>
+                        ) : (
+                          <div className="no-link">Link não encontrado</div>
+                        )}
+                      </article>
                     );
                   })}
                 </section>
 
-                {/* Gráfico histórico estimado */}
-                {ativo && (
-                  <section style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 20, padding: "clamp(14px, 4vw, 22px)" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
-                      <div>
-                        <LojaTag id={ativo.loja_id} nome={ativo.loja} />
-                        <h2 style={{ margin: "10px 0 0", fontSize: 20 }}>
-                          Histórico estimado
-                          <span style={{ fontSize: 12, color: T.muted, fontWeight: 400, marginLeft: 8 }}>
-                            (simulação visual — dados reais acumulam com o monitoramento)
-                          </span>
-                        </h2>
-                      </div>
-                      <a href={ativo.url} target="_blank" rel="noreferrer"
-                        style={{ background: lojaConf.cor || T.cyan, color: "#000", padding: "10px 14px", borderRadius: 10, textDecoration: "none", fontWeight: 950 }}>
+                <section className="chart-card">
+                  <div className="chart-header">
+                    <div>
+                      {ativo && <LojaTag id={ativo.loja_id} nome={ativo.loja} />}
+                      <h2>Histórico real</h2>
+                    </div>
+
+                    {ativo?.url && (
+                      <a
+                        href={ativo.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="chart-link"
+                        style={{ background: lojaConf.cor || T.cyan }}
+                      >
                         {ativo.link_tipo === "busca" ? "Abrir busca →" : "Abrir produto →"}
                       </a>
-                    </div>
-                    <div style={{ height: 260 }}>
+                    )}
+                  </div>
+
+                  {ativo?.historico?.length > 0 ? (
+                    <div className="chart-wrap">
                       <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={ativo.historicoEstimado}>
-                          <XAxis dataKey="data" tick={{ fontSize: 11, fill: T.dim }} axisLine={false} tickLine={false} />
-                          <YAxis tick={{ fontSize: 11, fill: T.dim }} axisLine={false} tickLine={false} width={70} />
+                        <LineChart data={ativo.historico}>
+                          <XAxis
+                            dataKey="data"
+                            tick={{ fontSize: 11, fill: T.dim }}
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <YAxis
+                            tick={{ fontSize: 11, fill: T.dim }}
+                            axisLine={false}
+                            tickLine={false}
+                            width={70}
+                          />
                           <Tooltip content={<TooltipChart />} />
                           <ReferenceLine y={meta} stroke={T.green} strokeDasharray="4 4" />
-                          <Line type="monotone" dataKey="preco" stroke={lojaConf.cor || T.cyan} strokeWidth={3} dot={false} activeDot={{ r: 5 }} />
+                          <Line
+                            type="monotone"
+                            dataKey="preco"
+                            stroke={lojaConf.cor || T.cyan}
+                            strokeWidth={3}
+                            dot={false}
+                            activeDot={{ r: 5 }}
+                          />
                         </LineChart>
                       </ResponsiveContainer>
                     </div>
-                  </section>
-                )}
+                  ) : (
+                    <div style={{ color: T.muted, lineHeight: 1.6 }}>
+                      Ainda não há histórico real suficiente para gerar gráfico. Ele aparecerá
+                      conforme o monitoramento salvar novas verificações.
+                    </div>
+                  )}
+                </section>
               </div>
             )}
 
             {aba === "cupons" && (
-              <section style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 18, padding: 18 }}>
-                <h2 style={{ marginTop: 0 }}>Cupons estimados</h2>
-                <p style={{ color: T.muted, lineHeight: 1.6 }}>
-                  Sem API oficial de cupons das lojas, não é possível confirmar se estão ativos.
-                  Teste no checkout antes de finalizar a compra.{" "}
-                  <b style={{ color: T.orange }}>Os preços exibidos NÃO incluem desconto de cupom.</b>
+              <section className="coupon-panel">
+                <h2>Possíveis cupons</h2>
+                <p>
+                  Cupons não são aplicados no preço principal. Eles aparecem apenas como
+                  candidatos para você testar no checkout.
                 </p>
-                <div style={{ display: "grid", gap: 10 }}>
-                  {resultados.filter(r => r.melhor_cupom).map(r => (
-                    <div key={`cupom-${r.loja_id}`} style={{ background: T.cardAlt, border: `1px solid ${T.border}`, borderRadius: 14, padding: 14 }}>
-                      <LojaTag id={r.loja_id} nome={r.loja} />
-                      <div style={{ marginTop: 10 }}>Cupom: <b style={{ color: T.orange }}>{r.melhor_cupom.codigo}</b></div>
-                      <div>
-                        Preço real: <b>{formatarMoeda(r.precoFinal)}</b>
-                        <span style={{ color: T.muted, fontSize: 12, marginLeft: 6 }}>(cupom não aplicado)</span>
-                      </div>
-                      <div style={{ color: T.muted, fontSize: 13 }}>{r.melhor_cupom.condicao}</div>
-                      <a href={r.url} target="_blank" rel="noreferrer"
-                        style={{ display: "inline-block", marginTop: 10, color: T.cyan, fontWeight: 900, textDecoration: "none" }}>
-                        Testar no site →
-                      </a>
+
+                <div className="coupon-grid">
+                  {cupons.length === 0 && (
+                    <div className="no-coupon">
+                      Nenhum possível cupom retornado pelo backend.
                     </div>
+                  )}
+
+                  {cupons.map((cupom, index) => (
+                    <article
+                      className="coupon-card"
+                      key={`cupom-${cupom.loja_id}-${cupom.codigo}-${index}`}
+                    >
+                      <LojaTag id={cupom.loja_id} nome={cupom.loja} />
+
+                      <div className="coupon-code">
+                        Cupom: <b>{cupom.codigo}</b>
+                      </div>
+
+                      <div>
+                        Preço real: <b>{formatarMoeda(cupom.precoReal)}</b>
+                      </div>
+
+                      <div className="coupon-meta">
+                        Confiança: <b>{cupom.confianca}</b> ·{" "}
+                        {cupom.verificado ? "verificado" : "não verificado"}
+                      </div>
+
+                      <p>{cupom.condicao}</p>
+                      <p>{cupom.aviso}</p>
+
+                      {cupom.url && (
+                        <a href={cupom.url} target="_blank" rel="noreferrer">
+                          Testar no checkout →
+                        </a>
+                      )}
+                    </article>
                   ))}
                 </div>
               </section>
             )}
 
-            {/* Análise automática */}
-            <section style={{ background: T.cyanDim, border: `1px solid ${T.cyan}30`, borderRadius: 18, padding: "18px 20px", marginTop: 16 }}>
-              <div style={{ color: T.cyan, fontSize: 12, fontWeight: 950, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>
-                🤖 Análise automática
-              </div>
-              <p style={{ margin: 0, color: T.text, lineHeight: 1.7 }}>{dados.analise}</p>
-            </section>
+            {dados.analise && (
+              <section className="analysis-card">
+                <div>🤖 Análise automática</div>
+                <p>{dados.analise}</p>
+              </section>
+            )}
           </>
         )}
       </div>
-    </div>
-  );
-}
-
-function Resumo({ label, value, color = T.text }) {
-  return (
-    <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 18, padding: 16, display: "flex", flexDirection: "column", gap: 6 }}>
-      <span style={{ color: T.muted, fontSize: 12, textTransform: "uppercase", letterSpacing: 1, fontWeight: 900 }}>{label}</span>
-      <strong style={{ color, fontSize: 20 }}>{value}</strong>
-    </div>
+    </main>
   );
 }
 
@@ -405,6 +613,7 @@ export default function App() {
   async function handleBuscar(form) {
     setCarregando(true);
     setErro("");
+
     try {
       const response = await fetch(`${API_URL}/buscar`, {
         method: "POST",
@@ -416,11 +625,22 @@ export default function App() {
           alerta_proximo_pct: form.proximidade,
           aceita_usado: form.aceitaUsado,
           aceita_novo: form.aceitaNovo,
+          cupom: "",
+          desconto_pct: 0,
         }),
       });
-      if (!response.ok) throw new Error("Erro na API");
+
+      if (!response.ok) {
+        throw new Error(`Erro HTTP ${response.status}`);
+      }
+
       const data = await response.json();
-      setDados(data);
+
+      setDados({
+        ...data,
+        resultados: normalizarResultadosBackend(data.resultados),
+      });
+
       setMeta(form.meta);
       setTela("resultado");
     } catch (error) {
@@ -436,7 +656,10 @@ export default function App() {
       <PainelResultado
         dados={dados}
         meta={meta}
-        onNovaBusca={() => { setTela("busca"); setDados(null); }}
+        onNovaBusca={() => {
+          setTela("busca");
+          setDados(null);
+        }}
       />
     );
   }
